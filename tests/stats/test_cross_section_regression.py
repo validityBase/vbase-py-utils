@@ -8,7 +8,6 @@ from vbase_utils.stats.cross_section_regression import (
     run_monthly_factor_returns
 )
 
-# --- Helpers for generating test data ---
 def make_simple_cs():
     # Two assets, single factor
     assets = ['A', 'B']
