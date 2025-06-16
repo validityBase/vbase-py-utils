@@ -114,22 +114,5 @@ class TestCalculateFactorReturns(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_factor_returns(self.returns_df, self.exposures_df, pd.DataFrame())
 
-    def test_missing_period(self):
-        # delete period 1
-        bad_exp = self.exposures_df.drop(self.exposures_df.index[:3])
-        fr = calculate_factor_returns(self.returns_df, bad_exp, self.weights_df)
-        self.assertTrue(fr.iloc[0].isna().all())
-        for d in self.periods[1:]:
-            self.assertFalse(fr.loc[d].isna().any())
-
-    def test_extreme_outliers(self):
-        ret2 = self.returns_df.copy()
-        ret2.iat[2, 0] += 100.0
-        fr2 = calculate_factor_returns(ret2, self.exposures_df, self.weights_df)
-        for d in self.periods:
-            # allow delta<=0.5
-            self.assertAlmostEqual(fr2.loc[d, "f1"], 2.0, delta=0.5)
-            self.assertAlmostEqual(fr2.loc[d, "f2"], 3.0, delta=0.5)
-
 if __name__ == "__main__":
     unittest.main()

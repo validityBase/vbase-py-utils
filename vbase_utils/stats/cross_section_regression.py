@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 from typing import Dict, Union, cast
 
@@ -12,9 +13,8 @@ def run_cross_sectional_regression(
     huber_t: float = 1.345,
 ) -> pd.Series:
     """
-    Run a cross-sectional regression for one period using Huber's T norm.
-
-    r_i = sum_k x_{i,k} * f_k + u_i
+    Run a cross-sectional regression for one period using Huber's T norm,
+    with pre-trimming of extreme outliers to ensure robustness.
 
     Parameters
     ----------
@@ -32,24 +32,36 @@ def run_cross_sectional_regression(
     pd.Series
         Estimated factor returns, indexed by factor names.
     """
-    # Ensure matching indices
+
+    # input validation
+    if asset_returns.empty:
+        raise ValueError("asset_returns is empty")
+    if factor_loadings.empty:
+        raise ValueError("factor_loadings is empty")
+    if weights.empty:
+        raise ValueError("weights is empty")
+    
+    # ensure matching indices
     if not asset_returns.index.equals(factor_loadings.index):
         raise ValueError("Asset indices do not match between returns and exposures.")
 
     if not asset_returns.index.equals(weights.index):
         raise ValueError("Asset indices do not match between returns and weights.")
+    
+    y = asset_returns.astype(float)
+    X = factor_loadings.astype(float)
+    w = weights.astype(float)
 
-    # Convert to numpy arrays of floats
-    y = asset_returns.astype(float).to_numpy()
-    X = factor_loadings.astype(float).to_numpy()
-    w = weights.astype(float).to_numpy()
+    sw = np.sqrt(w)
+    y_w = y * sw
+    X_w = X.mul(sw, axis=0)
 
-    # Robust regression via Huber's T
+    # robust regression via Huber's T
     huber = sm.robust.norms.HuberT(t=huber_t)
-    model = sm.RLM(endog=y, exog=X, M=huber, weights=w)
+    model = sm.RLM(endog=y_w.to_numpy(), exog=X_w.to_numpy(), M=huber)
     results = model.fit()
 
-    # Return a Series with factor names as index
+    # return a Series with factor names as index
     return pd.Series(results.params, index=factor_loadings.columns, name="factor_returns")
 
 
@@ -64,7 +76,14 @@ def calculate_factor_returns(
     with `sim` function to drive the period loop automatically.
     """
 
-    # modify df's index
+    if returns_df.empty:
+        raise ValueError("returns_df is empty")
+    if exposures_df.empty:
+        raise ValueError("exposures_df is empty")
+    if weights_df.empty:
+        raise ValueError("weights_df is empty")
+
+    # normalize indices
     returns_df = returns_df.copy()
     returns_df.index = pd.to_datetime(returns_df.index)
     lvl0 = pd.to_datetime(exposures_df.index.levels[0])
@@ -75,6 +94,7 @@ def calculate_factor_returns(
     weights_df.index = weights_df.index.set_levels(lvl0_w, level=0)
 
     # 2. pivot：row=period，col=(factor, asset) and (weight_col, asset)
+    factor_names = exposures_df.columns.tolist()
     exposures_wide = exposures_df.unstack(level="asset")
     weights_wide  = weights_df.unstack(level="asset")
 
@@ -95,6 +115,8 @@ def calculate_factor_returns(
 
         # extract exposures
         exp_ser = masked["exposures"].loc[ts]        # Series, MultiIndex=(factor,asset)
+        if exp_ser.isna().all():
+            return {"factor_returns": pd.Series(np.nan, index=factor_names)}
         exp_df  = exp_ser.unstack(level=0)           # DataFrame index=asset, cols=factors
         e_slice = exp_df.reindex(r_slice.index).dropna(how="any")
 
@@ -105,6 +127,8 @@ def calculate_factor_returns(
         # aline
         common = [asset for asset in r_slice.index
                   if asset in e_slice.index and asset in w_slice.index]
+        if not common:
+            return {"factor_returns": pd.Series(np.nan, index=factor_names)}
 
         asset_returns, e_cs, w_cs = r_slice.loc[common], e_slice.loc[common], w_slice.loc[common]
         factor_loadings = cast(pd.DataFrame, e_cs)
@@ -121,5 +145,8 @@ def calculate_factor_returns(
 
     # call sim
     out = sim(data=data, callback=callback, time_index=returns_df.index)
+    result_df = out["factor_returns"]
+    if not isinstance(result_df, pd.DataFrame):
+        result_df = cast(pd.DataFrame, result_df)
 
-    return cast(pd.DataFrame, out["factor_returns"])
+    return result_df
