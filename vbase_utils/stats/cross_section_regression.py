@@ -13,8 +13,7 @@ def run_cross_sectional_regression(
     huber_t: float = 1.345,
 ) -> pd.Series:
     """
-    Run a cross-sectional regression for one period using Huber's T norm,
-    with pre-trimming of extreme outliers to ensure robustness.
+    Run a cross-sectional regression for one period using Huber's T norm
 
     Parameters
     ----------
@@ -40,14 +39,14 @@ def run_cross_sectional_regression(
         raise ValueError("factor_loadings is empty")
     if weights.empty:
         raise ValueError("weights is empty")
-    
+
     # ensure matching indices
     if not asset_returns.index.equals(factor_loadings.index):
         raise ValueError("Asset indices do not match between returns and exposures.")
 
     if not asset_returns.index.equals(weights.index):
         raise ValueError("Asset indices do not match between returns and weights.")
-    
+
     y = asset_returns.astype(float)
     X = factor_loadings.astype(float)
     w = weights.astype(float)
@@ -115,8 +114,6 @@ def calculate_factor_returns(
 
         # extract exposures
         exp_ser = masked["exposures"].loc[ts]        # Series, MultiIndex=(factor,asset)
-        if exp_ser.isna().all():
-            return {"factor_returns": pd.Series(np.nan, index=factor_names)}
         exp_df  = exp_ser.unstack(level=0)           # DataFrame index=asset, cols=factors
         e_slice = exp_df.reindex(r_slice.index).dropna(how="any")
 
