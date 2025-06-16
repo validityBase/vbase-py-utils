@@ -20,7 +20,7 @@ def run_cross_sectional_regression(
     asset_returns : pd.Series
         Asset excess returns.
     factor_loadings : pd.DataFrame
-        Exposures.
+        Factor exposures.
     weights : pd.Series
         Cross-sectional factor weights.
     huber_t : float, default=1.345
