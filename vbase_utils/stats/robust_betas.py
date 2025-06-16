@@ -106,57 +106,30 @@ def robust_betas(
             f"df_fact_rets has {df_fact_rets.shape[0]} rows."
         )
 
-    # Align df_asset_rets and df_fact_rets indices and handle NaNs
-    df_combined: pd.DataFrame = pd.concat(
-        [df_asset_rets, df_fact_rets], axis=1, join="inner"
+    # Make sure that the indices are the same.
+    # We do not know at this level what is the best way to combine and align
+    # the indices so must fail.
+    if not df_asset_rets.index.equals(df_fact_rets.index):
+        raise ValueError("df_asset_rets and df_fact_rets must have the same index.")
+
+    n_timestamps, _ = df_asset_rets.shape
+
+    df_betas: pd.DataFrame = pd.DataFrame(
+        index=df_fact_rets.columns, columns=df_asset_rets.columns
     )
-    if df_combined.empty:
-        logger.error(
-            "No overlapping timestamps between df_asset_rets and df_fact_rets."
-        )
-        raise ValueError(
-            "No overlapping timestamps between df_asset_rets and df_fact_rets."
-        )
-
-    df_y_clean: pd.DataFrame = df_combined[df_asset_rets.columns].dropna()
-    df_x_clean: pd.DataFrame = df_combined[df_fact_rets.columns].loc[df_y_clean.index]
-
-    n_timestamps, _ = df_y_clean.shape
-
-    # Log data cleaning results
-    if len(df_asset_rets) != n_timestamps:
-        dropped_rows = len(df_asset_rets) - n_timestamps
-        logger.warning(
-            "Dropped %d rows due to NaNs or index misalignment. "
-            "Remaining timestamps: %d",
-            dropped_rows,
-            n_timestamps,
-        )
-        # Check for excessive NaN dropping
-        if dropped_rows > 0.5 * len(df_asset_rets):
-            logger.error(
-                "Excessive data loss: %d rows dropped of %d.",
-                dropped_rows,
-                len(df_asset_rets),
-            )
-            raise ValueError(
-                f"Excessive data loss: {dropped_rows} rows dropped of {len(df_asset_rets)}."
-            )
 
     # Check minimum timestamps
     if n_timestamps < min_timestamps:
-        logger.error(
+        logger.warning(
             "Insufficient data: %d timestamps available, minimum required is %d.",
             n_timestamps,
             min_timestamps,
         )
-        raise ValueError(
-            f"Insufficient data: {n_timestamps} timestamps available, "
-            f"minimum required is {min_timestamps}."
-        )
+        # Return a DataFrame with all NaNs.
+        return df_betas
 
     # Check for near-zero variance in df_fact_rets
-    if df_x_clean.var().min() < NEAR_ZERO_VARIANCE_THRESHOLD:
+    if df_fact_rets.var().min() < NEAR_ZERO_VARIANCE_THRESHOLD:
         logger.error("One or more factors in df_fact_rets have near-zero variance.")
         raise ValueError("One or more factors in df_fact_rets have near-zero variance.")
 
@@ -166,15 +139,11 @@ def robust_betas(
     )
     sqrt_weights: np.ndarray = np.sqrt(weights)
 
-    df_betas: pd.DataFrame = pd.DataFrame(
-        index=list(df_x_clean.columns), columns=df_y_clean.columns
-    )
-
     # Implement weighted regression for each asset
     # by multiplying the x and y matrices by the square root of the weights.
-    x_weighted: pd.DataFrame = df_x_clean.multiply(sqrt_weights, axis=0)
-    for asset in df_y_clean.columns:
-        y: np.ndarray = df_y_clean[asset].values
+    x_weighted: pd.DataFrame = df_fact_rets.multiply(sqrt_weights, axis=0)
+    for asset in df_asset_rets.columns:
+        y: np.ndarray = df_asset_rets[asset].values
         y_weighted: np.ndarray = y * sqrt_weights
 
         x_w_const: pd.DataFrame = sm.add_constant(x_weighted)

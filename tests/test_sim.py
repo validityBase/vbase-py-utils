@@ -85,7 +85,7 @@ class TestSim(unittest.TestCase):
 
         # pylint: disable=unused-argument
         def callback(
-            data: Dict[str, pd.DataFrame | pd.Series]
+            data: Dict[str, pd.DataFrame | pd.Series],
         ) -> Dict[str, pd.DataFrame | pd.Series]:
             return {"values": {"A": [1, 2, 3]}}  # type: ignore
 
@@ -111,10 +111,9 @@ class TestSim(unittest.TestCase):
             return {"values": pd.Series([1, 2, 3])}
 
         result = sim({}, callback, self.time_index)
-        self.assertIsInstance(result, dict)
-        self.assertIn("values", result)
-        self.assertIsInstance(result["values"], pd.DataFrame)
-        self.assertEqual(len(result["values"]), len(self.time_index))
+
+        # If all input data is empty, the callback will be skipped.
+        self.assertEqual(result, {})
 
     def test_data_masking(self):
         """Test that data is properly masked at each timestamp."""
@@ -149,6 +148,45 @@ class TestSim(unittest.TestCase):
         self.assertTrue(
             pd.isna(result["result"]["sum"].iloc[1])
         )  # Should be NaN where either input is NaN
+
+    def test_column_masking(self):
+        """Test that columns with data only after a timestamp are removed by masking."""
+        # Create a DataFrame with columns that start at different timestamps
+        dates = pd.date_range("2023-01-01", periods=5)
+        df = pd.DataFrame(
+            {
+                "early_col": [1, 2, 3, 4, 5],  # Data from start
+                "mid_col": [None, None, 3, 4, 5],  # Data starts at index 2
+                "late_col": [None, None, None, 4, 5],  # Data starts at index 3
+            },
+            index=dates,
+        )
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            df = data["df"]
+            # Return the columns available at each timestamp
+            return {
+                "columns": pd.Series([",".join(sorted(df.columns))], index=["cols"])
+            }
+
+        result = sim({"df": df}, callback, dates)
+
+        # Check that columns are properly masked at each timestamp
+        self.assertEqual(
+            result["columns"]["cols"].iloc[0], "early_col"
+        )  # Only early_col at t=0
+        self.assertEqual(
+            result["columns"]["cols"].iloc[1], "early_col"
+        )  # Only early_col at t=1
+        self.assertEqual(
+            result["columns"]["cols"].iloc[2], "early_col,mid_col"
+        )  # early_col and mid_col at t=2
+        self.assertEqual(
+            result["columns"]["cols"].iloc[3], "early_col,late_col,mid_col"
+        )  # All columns at t=3
+        self.assertEqual(
+            result["columns"]["cols"].iloc[4], "early_col,late_col,mid_col"
+        )  # All columns at t=4
 
 
 if __name__ == "__main__":

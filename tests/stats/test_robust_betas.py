@@ -158,8 +158,13 @@ class TestRobustBetas(unittest.TestCase):
         )
         df_asset_rets = pd.DataFrame({"Asset1": short_asset_returns})
         df_fact_rets = pd.DataFrame({"SPY": short_spy_returns})
-        with self.assertRaises(ValueError):
-            robust_betas(df_asset_rets, df_fact_rets, half_life=2, min_timestamps=10)
+        # When insufficient timestamps are available, a warning is issued
+        # and a DataFrame with all NaN betas is returned.
+        beta_matrix = robust_betas(
+            df_asset_rets, df_fact_rets, half_life=2, min_timestamps=10
+        )
+        # Check that the betas are all NaN.
+        self.assertTrue(beta_matrix.isna().all().all())
 
 
 if __name__ == "__main__":

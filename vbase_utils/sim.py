@@ -4,6 +4,7 @@ import logging
 from typing import Callable, Dict, List
 
 import pandas as pd
+from tqdm import tqdm
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ def sim(
         Dict[str, pd.DataFrame | pd.Series],
     ],
     time_index: pd.DatetimeIndex,
+    progress: bool = False,
 ) -> Dict[str, pd.DataFrame | pd.Series]:
     """Simulate processing of time series data using a callback function.
 
@@ -34,6 +36,7 @@ def sim(
             mapping labels to Series.
         time_index: DatetimeIndex specifying the simulation timestamps.
             The function will process data up to each timestamp in this index.
+        progress: Whether to show a progress bar during simulation. Defaults to False.
 
     Returns:
         Dictionary mapping labels to DataFrames and/or Series
@@ -57,17 +60,45 @@ def sim(
     results: Dict[str, List[pd.DataFrame]] = {}
 
     # Process each timestamp
-    for timestamp in time_index:
+    iterator = (
+        # Use tqdm to report progress if progress is True.
+        tqdm(time_index, desc="Simulating", unit="timestamp")
+        if progress
+        else time_index
+    )
+    for timestamp in iterator:
         try:
-            # Mask data for current timestamp
+            # Mask data for current timestamp.
             masked_data = {
                 label: obj[obj.index <= timestamp] for label, obj in data.items()
             }
 
-            # Call callback function
+            # Note that this masking above does not remove columns
+            # that are not in the dataset before timestamp.
+            # Drop pd.DataFrame columns that are all None.
+            # This ensures that the callback function only sees the columns
+            # that are available at the current timestamp.
+            masked_data = {
+                label: (
+                    obj.dropna(axis=1, how="all")
+                    # Process pd.DataFrame objects only.
+                    # This operation makes no sense for pd.Series objects.
+                    if isinstance(obj, pd.DataFrame)
+                    else obj
+                )
+                for label, obj in masked_data.items()
+            }
+
+            # If all input or output data is empty, skip the callback.
+            # This can happen if not enough data is available
+            # at the current timestamp.
+            if all(obj.empty for obj in masked_data.values()):
+                continue
+
+            # Call the callback function.
             result_dict = callback(masked_data)
 
-            # Validate callback result
+            # Validate the callback result.
             if not isinstance(result_dict, dict):
                 raise ValueError(
                     "Callback must return a dictionary of pandas Series or DataFrames, "

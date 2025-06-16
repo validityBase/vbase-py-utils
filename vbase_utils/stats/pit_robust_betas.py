@@ -1,7 +1,7 @@
 """Point-in-time robust regression module for calculating hedge ratios and residuals."""
 
 import logging
-from typing import Dict, Optional, cast
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -23,6 +23,7 @@ def pit_robust_betas(
     lambda_: Optional[float] = None,
     min_timestamps: int = 10,
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
+    progress: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -40,6 +41,7 @@ def pit_robust_betas(
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
             If not provided, uses all timestamps from df_asset_rets.
+        progress: Whether to show a progress bar during simulation. Defaults to False.
 
     Returns:
         Dictionary containing:
@@ -73,26 +75,22 @@ def pit_robust_betas(
     if not df_asset_rets.index.equals(df_fact_rets.index):
         raise ValueError("df_asset_rets and df_fact_rets must have the same index")
 
-    # Use provided rebalance_time_index or all timestamps
-    time_index = (
-        rebalance_time_index
-        if rebalance_time_index is not None
-        else df_asset_rets.index
-    )
+    # If rebalance_time_index is not provided, use the asset returns index.
+    if rebalance_time_index is None:
+        rebalance_time_index = df_asset_rets.index
 
     # Define callback function for sim
     def regression_callback(
-        data: Dict[str, pd.DataFrame | pd.Series]
+        data: Dict[str, pd.DataFrame | pd.Series],
     ) -> Dict[str, pd.DataFrame | pd.Series]:
         """Callback function to run robust regression on masked data."""
-        # Extract masked data and ensure they are DataFrames
-        masked_asset_rets = cast(pd.DataFrame, data["asset_rets"])
-        masked_fact_rets = cast(pd.DataFrame, data["fact_rets"])
+        df_asset_rets = data["df_asset_rets"]
+        df_fact_rets = data["df_fact_rets"]
 
         # Run robust regression
         beta_matrix = robust_betas(
-            masked_asset_rets,
-            masked_fact_rets,
+            df_asset_rets,
+            df_fact_rets,
             half_life=half_life,
             lambda_=lambda_,
             min_timestamps=min_timestamps,
@@ -110,7 +108,7 @@ def pit_robust_betas(
     results = {
         "betas": pd.DataFrame(
             index=pd.MultiIndex.from_product(
-                [time_index, factor_names], names=["timestamp", "factor"]
+                [rebalance_time_index, factor_names], names=["timestamp", "factor"]
             ),
             columns=asset_names,
             dtype=float,
@@ -118,11 +116,12 @@ def pit_robust_betas(
     }
 
     # Run simulation only for timestamps after min_timestamps.
-    if len(time_index) > min_timestamps:
+    if len(df_asset_rets.index) > min_timestamps:
         sim_results = sim(
-            {"asset_rets": df_asset_rets, "fact_rets": df_fact_rets},
+            {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
             regression_callback,
-            time_index[min_timestamps:],
+            rebalance_time_index,
+            progress=progress,
         )
         # Fill in the betas DataFrame with the actual values from the simulation.
         results["betas"].update(sim_results["betas"])
@@ -132,13 +131,15 @@ def pit_robust_betas(
     # Get the betas DataFrame.
     df_betas = results["betas"]
 
-    # Set the timestampindex to the time_index.
-    df_betas.index = pd.MultiIndex.from_product(
-        [time_index, factor_names], names=["timestamp", "factor"]
+    # Reindex betas to the new MultiIndex and fill in missing values
+    # Create a MultiIndex for the asset returns index
+    new_index = pd.MultiIndex.from_product(
+        [df_asset_rets.index, factor_names], names=["timestamp", "factor"]
     )
+    df_betas = df_betas.reindex(new_index)
 
     # Forward fill betas along the timestamp index to match return timestamps.
-    df_betas.ffill(inplace=True)
+    df_betas.ffill(inplace=True, axis=0)
 
     # Shift the betas by 1 day.
     # This ensures we use betas from t-1 to hedge returns at t

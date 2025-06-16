@@ -130,7 +130,7 @@ class TestPitRobustBetas(unittest.TestCase):
     def test_rebalance_time_index(self):
         """Test using custom rebalance time index."""
         # Create monthly rebalance dates
-        rebalance_dates = pd.date_range("2023-01-01", "2023-12-31", freq="M")
+        rebalance_dates = pd.date_range("2023-01-01", "2023-12-31", freq="ME")
 
         results = pit_robust_betas(
             self.df_asset_rets,
@@ -139,10 +139,18 @@ class TestPitRobustBetas(unittest.TestCase):
             rebalance_time_index=rebalance_dates,
         )
 
-        # Check that betas are only calculated on rebalance dates
+        # Check that betas have been expanded to the asset returns index.
         self.assertEqual(
             set(results["df_betas"].index.get_level_values("timestamp")),
-            set(rebalance_dates),
+            set(self.df_asset_rets.index),
+        )
+        # Check that the betas are constant between the rebalance dates.
+        # A simple check is that the number of non-NA and non-zero differences
+        # is less than 10% of the total number of elements.
+        self.assertGreater(
+            (results["df_betas"].diff() == 0).sum().sum()
+            + results["df_betas"].isna().sum().sum() / results["df_betas"].size,
+            0.9,
         )
 
     def test_empty_data(self):
