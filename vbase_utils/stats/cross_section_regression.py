@@ -1,5 +1,8 @@
 import pandas as pd
 import statsmodels.api as sm
+from typing import Dict, Union, cast
+
+from vbase_utils.sim import sim
 
 
 def run_cross_sectional_regression(
@@ -33,6 +36,9 @@ def run_cross_sectional_regression(
     if not asset_returns.index.equals(factor_loadings.index):
         raise ValueError("Asset indices do not match between returns and exposures.")
 
+    if not asset_returns.index.equals(weights.index):
+        raise ValueError("Asset indices do not match between returns and weights.")
+
     # Convert to numpy arrays of floats
     y = asset_returns.astype(float).to_numpy()
     X = factor_loadings.astype(float).to_numpy()
@@ -47,68 +53,73 @@ def run_cross_sectional_regression(
     return pd.Series(results.params, index=factor_loadings.columns, name="factor_returns")
 
 
-def run_monthly_factor_returns(
+def calculate_factor_returns(
     returns_df: pd.DataFrame,
     exposures_df: pd.DataFrame,
     weights_df: pd.DataFrame,
     huber_t: float = 1.345,
 ) -> pd.DataFrame:
     """
-    Compute factor returns for each period by calling run_cross_sectional_regression.
-
-    Parameters
-    ----------
-    returns_df : pd.DataFrame
-        Asset returns, rows=assets, cols=periods.
-    exposures_df : pd.DataFrame
-        MultiIndex (period, asset) exposures, columns=factors.
-    weights_df : pd.DataFrame
-        MultiIndex (period, asset) weights.
-    huber_t : float, default=1.345
-        Huber's T tuning constant.
-
-    Returns
-    -------
-    pd.DataFrame
-        Factor returns for each period; rows=periods, cols=factors.
+    Calculate factor returns for each period by calling run_cross_sectional_regression,
+    with `sim` function to drive the period loop automatically.
     """
-    periods = list(returns_df.columns)
-    factor_names = list(exposures_df.columns)
-    results = pd.DataFrame(index=periods, columns=factor_names, dtype=float)
 
-    for period in periods:
-        # Asset returns for this period
-        r_slice = returns_df[period].dropna()
+    # modify df's index
+    returns_df = returns_df.copy()
+    returns_df.index = pd.to_datetime(returns_df.index)
+    lvl0 = pd.to_datetime(exposures_df.index.levels[0])
+    exposures_df = exposures_df.copy()
+    exposures_df.index = exposures_df.index.set_levels(lvl0, level=0)
+    lvl0_w = pd.to_datetime(weights_df.index.levels[0])
+    weights_df = weights_df.copy()
+    weights_df.index = weights_df.index.set_levels(lvl0_w, level=0)
 
-        # Exposures for this period (always a DataFrame)
-        e_period_df = exposures_df.xs(period, level=0)
-        e_slice = e_period_df.reindex(r_slice.index).dropna(how="any")
+    # 2. pivot：row=period，col=(factor, asset) and (weight_col, asset)
+    exposures_wide = exposures_df.unstack(level="asset")
+    weights_wide  = weights_df.unstack(level="asset")
 
-        # Weights for this period
-        w_period_df = weights_df.xs(period, level=0)
-        if isinstance(w_period_df, pd.DataFrame):
-            w_ser = w_period_df.iloc[:, 0]
-        else:
-            w_ser = w_period_df
+    data = {
+        "returns": returns_df,
+        "exposures": exposures_wide,
+        "weights": weights_wide,
+    }
+
+    def callback(masked: Dict[str, Union[pd.DataFrame, pd.Series]]
+    ) -> Dict[str, Union[pd.DataFrame, pd.Series]]:
+
+        ts = masked["returns"].index[-1]
+
+        # extract returns
+        r_all = masked["returns"].iloc[-1]           # Series, index=assets
+        r_slice = r_all.dropna()
+
+        # extract exposures
+        exp_ser = masked["exposures"].loc[ts]        # Series, MultiIndex=(factor,asset)
+        exp_df  = exp_ser.unstack(level=0)           # DataFrame index=asset, cols=factors
+        e_slice = exp_df.reindex(r_slice.index).dropna(how="any")
+
+        # extract weights:
+        w_ser = masked["weights"].loc[ts].droplevel(0)
         w_slice = w_ser.reindex(r_slice.index).dropna()
 
-        # Align indices
-        common_index = (
-            r_slice.index
-            .intersection(list(e_slice.index))
-            .intersection(list(w_slice.index))
-        )
-        r_cs = r_slice.loc[common_index]
-        e_cs = pd.DataFrame(e_slice.loc[common_index])
-        w_cs = w_slice.loc[common_index]
+        # aline
+        common = [asset for asset in r_slice.index
+                  if asset in e_slice.index and asset in w_slice.index]
 
-        # Get factor returns for this period
-        facret = run_cross_sectional_regression(
-            asset_returns=r_cs,
-            factor_loadings=e_cs,
-            weights=w_cs,
-            huber_t=huber_t,
-        )
-        results.loc[period, :] = facret.values
+        asset_returns, e_cs, w_cs = r_slice.loc[common], e_slice.loc[common], w_slice.loc[common]
+        factor_loadings = cast(pd.DataFrame, e_cs)
+        weights         = cast(pd.Series, w_cs)
 
-    return results
+        fr = run_cross_sectional_regression(
+            asset_returns = asset_returns,
+            factor_loadings = factor_loadings,
+            weights = weights,
+            huber_t = huber_t,
+        )
+
+        return {"factor_returns": fr}
+
+    # call sim
+    out = sim(data=data, callback=callback, time_index=returns_df.index)
+
+    return cast(pd.DataFrame, out["factor_returns"])
