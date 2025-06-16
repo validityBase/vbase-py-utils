@@ -18,11 +18,11 @@ def run_cross_sectional_regression(
     Parameters
     ----------
     asset_returns : pd.Series
-        Asset excess returns, indexed by asset IDs.
+        Asset excess returns.
     factor_loadings : pd.DataFrame
-        Exposures for the same period, indexed by asset IDs.
+        Exposures.
     weights : pd.Series
-        Cross-sectional weights, indexed by asset IDs.
+        Cross-sectional factor weights.
     huber_t : float, default=1.345
         Huber's T tuning constant.
 
@@ -73,6 +73,22 @@ def calculate_factor_returns(
     """
     Calculate factor returns for each period by calling run_cross_sectional_regression,
     with `sim` function to drive the period loop automatically.
+
+    Parameters
+    ----------
+    asset_returns : pd.DataFrame
+        Asset excess returns, row / index = periods, col = asset names
+    factor_loadings : pd.DataFrame
+        Exposures, multiindex(periods, asset names).
+    weights : pd.Series
+        Cross-sectional factor weights, multiindex(periods, asset names).
+    huber_t : float, default=1.345
+        Huber's T tuning constant.
+
+    Returns
+    -------
+    pd.DataFrame
+        Estimated factor returns, indexed by periods.
     """
 
     if returns_df.empty:
