@@ -18,18 +18,18 @@ def run_cross_sectional_regression(
     Parameters
     ----------
     asset_returns : pd.Series
-        Asset excess returns.
+        Asset excess returns with shape (N_assets, ).
     factor_loadings : pd.DataFrame
-        Factor exposures.
+        Factor exposures with shape (N_assets, N_factors).
     weights : pd.Series
-        Cross-sectional factor weights.
+        Cross-sectional regression asset weights with shape (N_factors, ).
     huber_t : float, default=1.345
         Huber's T tuning constant.
 
     Returns
     -------
     pd.Series
-        Estimated factor returns, indexed by factor names.
+        Estimated factor returns indexed by factor names with shape (N_factors, ).
     """
 
     # input validation
@@ -47,17 +47,15 @@ def run_cross_sectional_regression(
     if not asset_returns.index.equals(weights.index):
         raise ValueError("Asset indices do not match between returns and weights.")
 
-    y = asset_returns.astype(float)
-    X = factor_loadings.astype(float)
-    w = weights.astype(float)
+    com_idx = asset_returns.index.intersection(factor_loadings.index).intersection(weights.index)
 
-    sw = np.sqrt(w)
-    y_w = y * sw
-    X_w = X.mul(sw, axis=0)
+    y = asset_returns.loc[com_idx].astype(float)
+    X = factor_loadings.loc[com_idx].astype(float)
+    w = weights.loc[com_idx].astype(float)
 
     # robust regression via Huber's T
     huber = sm.robust.norms.HuberT(t=huber_t)
-    model = sm.RLM(endog=y_w.to_numpy(), exog=X_w.to_numpy(), M=huber)
+    model = sm.RLM(endog=y, exog=X, M=huber, weights=w)
     results = model.fit()
 
     # return a Series with factor names as index
@@ -77,47 +75,43 @@ def calculate_factor_returns(
     Parameters
     ----------
     asset_returns : pd.DataFrame
-        Asset excess returns, row / index = periods, col = asset names
+        Asset excess returns with shape (N_periods, N_assets). rows = date, cols=asset
     factor_loadings : pd.DataFrame
-        Exposures, multiindex(periods, asset names).
+        Factor Exposures with shape (N_periods, N_factors, N_assets). rows = period, cols = multiindex(factor_name, asset_name)
     weights : pd.Series
-        Cross-sectional factor weights, multiindex(periods, asset names).
+        Cross-sectional regression asset weights with shape (N_periods, N_assets). rows = date, cols = asset
     huber_t : float, default=1.345
         Huber's T tuning constant.
 
     Returns
     -------
     pd.DataFrame
-        Estimated factor returns, indexed by periods.
+        Estimated factor returns indexed by periods with shape (N_periods, N_factors).
     """
 
-    if returns_df.empty:
-        raise ValueError("returns_df is empty")
-    if exposures_df.empty:
-        raise ValueError("exposures_df is empty")
-    if weights_df.empty:
-        raise ValueError("weights_df is empty")
+    for name, df in [("returns", returns_df),
+                     ("exposures", exposures_df),
+                     ("weights", weights_df)]:
+        if df.empty:
+            raise ValueError(f"{name}_df is empty")
 
-    # normalize indices
-    returns_df = returns_df.copy()
-    returns_df.index = pd.to_datetime(returns_df.index)
-    lvl0 = pd.to_datetime(exposures_df.index.levels[0])
-    exposures_df = exposures_df.copy()
-    exposures_df.index = exposures_df.index.set_levels(lvl0, level=0)
-    lvl0_w = pd.to_datetime(weights_df.index.levels[0])
-    weights_df = weights_df.copy()
-    weights_df.index = weights_df.index.set_levels(lvl0_w, level=0)
+    returns_df.index   = pd.to_datetime(returns_df.index)
+    exposures_df.index = pd.to_datetime(exposures_df.index)
+    weights_df.index   = pd.to_datetime(weights_df.index)
 
-    # 2. pivot：row=period，col=(factor, asset) and (weight_col, asset)
-    factor_names = exposures_df.columns.tolist()
-    exposures_wide = exposures_df.unstack(level="asset")
-    weights_wide  = weights_df.unstack(level="asset")
+    factor_names = (
+        exposures_df.columns
+        .get_level_values(0)
+        .unique()
+        .tolist()
+    )
 
-    data = {
-        "returns": returns_df,
-        "exposures": exposures_wide,
-        "weights": weights_wide,
+    raw_data: Dict[str, pd.DataFrame] = {
+    "returns":   returns_df,
+    "exposures": exposures_df,
+    "weights":   weights_df,
     }
+
 
     def callback(masked: Dict[str, Union[pd.DataFrame, pd.Series]]
     ) -> Dict[str, Union[pd.DataFrame, pd.Series]]:
@@ -125,25 +119,22 @@ def calculate_factor_returns(
         ts = masked["returns"].index[-1]
 
         # extract returns
-        r_all = masked["returns"].iloc[-1]           # Series, index=assets
-        r_slice = r_all.dropna()
+        y = masked["returns"].iloc[-1].dropna()               # Series, index=assets
 
         # extract exposures
-        exp_ser = masked["exposures"].loc[ts]        # Series, MultiIndex=(factor,asset)
-        exp_df  = exp_ser.unstack(level=0)           # DataFrame index=asset, cols=factors
-        e_slice = exp_df.reindex(r_slice.index).dropna(how="any")
+        exp_ser = masked["exposures"].loc[ts].dropna()        # Series, MultiIndex = (factor,asset)
+        X = exp_ser.unstack(level=0)                          # Unstack the MultiIndex to shape (N_assets, N_factors)
 
         # extract weights:
-        w_ser = masked["weights"].loc[ts].droplevel(0)
-        w_slice = w_ser.reindex(r_slice.index).dropna()
+        w = masked["weights"].loc[ts].astype(float).dropna()  # Series, index=assets
 
         # aline
-        common = [asset for asset in r_slice.index
-                  if asset in e_slice.index and asset in w_slice.index]
+        common = [asset for asset in y.index
+                  if asset in X.index and asset in w.index]
         if not common:
             return {"factor_returns": pd.Series(np.nan, index=factor_names)}
 
-        asset_returns, e_cs, w_cs = r_slice.loc[common], e_slice.loc[common], w_slice.loc[common]
+        asset_returns, e_cs, w_cs = y.loc[common], X.loc[common], w.loc[common]
         factor_loadings = cast(pd.DataFrame, e_cs)
         weights         = cast(pd.Series, w_cs)
 
@@ -157,9 +148,81 @@ def calculate_factor_returns(
         return {"factor_returns": fr}
 
     # call sim
-    out = sim(data=data, callback=callback, time_index=returns_df.index)
+    out = sim(data=cast(Dict[str, Union[pd.DataFrame, pd.Series]], raw_data), callback=callback, time_index=returns_df.index)
     result_df = out["factor_returns"]
     if not isinstance(result_df, pd.DataFrame):
         result_df = cast(pd.DataFrame, result_df)
 
     return result_df
+
+def wide_to_long(
+    wide: pd.DataFrame,
+    *,
+    date_name: str = "date",
+    symbol_name: str = "symbol",
+    factor_name: str = "factor",
+    value_name: str = "loading",
+) -> pd.DataFrame:
+    """
+    Convert a wide factor-exposure table with columns MultiIndex (factor, symbol) into a tidy long DataFrame.
+
+    Parameters
+    ----------
+    wide : DataFrame
+        index = date ; columns = MultiIndex(level-0=factor, level-1=symbol)
+
+    Returns
+    -------
+    DataFrame  with columns [date, symbol, factor, loading]
+    """
+
+    if not isinstance(wide.columns, pd.MultiIndex) or wide.columns.nlevels != 2:
+        raise ValueError("`wide` must have 2-level MultiIndex columns (factor, symbol)")
+
+    long = (
+        wide.stack(level=[1, 0])
+            .reset_index()
+    )
+    long.columns = [date_name, symbol_name, factor_name, value_name]
+
+    return long.sort_values([date_name, symbol_name, factor_name]).reset_index(drop=True)
+
+def long_to_wide(
+    long: pd.DataFrame,
+    *,
+    date_col: str = "date",
+    symbol_col: str = "symbol",
+    factor_col: str = "factor",
+    value_col: str = "loading",
+) -> pd.DataFrame:
+    """
+    Pivot a tidy long DataFrame into the wide format with
+    MultiIndex(factor, symbol) columns.
+
+    Parameters
+    ----------
+    long : DataFrame
+        columns must include [date_col, symbol_col, factor_col, value_col]
+
+    Returns
+    -------
+    DataFrame  index = date ; columns = MultiIndex(factor, symbol)
+    """
+
+    missing = {date_col, symbol_col, factor_col, value_col} - set(long.columns)
+    if missing:
+        raise ValueError(f"Input `long` missing columns: {missing}")
+
+    wide = (
+        long
+        .pivot_table(
+            index=date_col,
+            columns=[factor_col, symbol_col],
+            values=value_col,
+            aggfunc="first"
+        )
+        .sort_index(axis=1, level=[0, 1])
+    )
+    wide.index.name = None
+    wide.columns.names = [factor_col, symbol_col]
+    return wide
