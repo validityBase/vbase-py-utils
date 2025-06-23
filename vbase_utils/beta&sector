@@ -1,0 +1,123 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import requests
+from io import StringIO
+from typing import Dict, Optional
+import os
+
+# === Step 1: Get SP500 symbols and GICS sectors ===
+def get_sp500_symbols_and_sectors() -> pd.DataFrame:
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    response = requests.get(url)
+    tables = pd.read_html(StringIO(response.text))
+    df = tables[0][["Symbol", "GICS Sector"]].rename(columns={"Symbol": "symbol", "GICS Sector": "sector"})
+    return df
+
+# === Step 2: One-hot encode GICS Sectors ===
+def generate_sector_exposures(sp500_df: pd.DataFrame) -> pd.DataFrame:
+    sector_ohe = pd.get_dummies(sp500_df["sector"], prefix="Sector").astype(int)
+    return pd.concat([sp500_df[["symbol"]], sector_ohe], axis=1).set_index("symbol")
+
+# === Step 3: Robust regression for one period ===
+def robust_betas(asset_rets, fact_rets, min_timestamps=252):
+    results = pd.DataFrame(index=fact_rets.columns, columns=asset_rets.columns, dtype=float)
+    for asset in asset_rets:
+        y = asset_rets[asset].dropna()
+        x = fact_rets.loc[y.index]
+        if len(y) >= min_timestamps:
+            X = sm.add_constant(x)
+            model = sm.OLS(y, X).fit()
+            results.loc[fact_rets.columns[0], asset] = model.params[1]
+    return results
+
+# === Step 4: Rolling regression with daily rebalance ===
+def pit_robust_betas(
+    df_asset_rets: pd.DataFrame,
+    df_fact_rets: pd.DataFrame,
+    half_life: Optional[float] = None,
+    lambda_: Optional[float] = None,
+    min_timestamps: int = 252,
+    rebalance_time_index: Optional[pd.DatetimeIndex] = None,
+) -> Dict[str, pd.DataFrame]:
+    if df_asset_rets.empty or df_fact_rets.empty:
+        raise ValueError("Input DataFrames cannot be empty.")
+    if not isinstance(df_asset_rets.index, pd.DatetimeIndex):
+        raise ValueError("df_asset_rets must have a DatetimeIndex.")
+    if not df_asset_rets.index.equals(df_fact_rets.index):
+        raise ValueError("Indices must align.")
+
+    time_index = rebalance_time_index or df_asset_rets.index[min_timestamps:]
+    betas = pd.DataFrame(
+        index=pd.MultiIndex.from_product([time_index, df_fact_rets.columns], names=["timestamp", "factor"]),
+        columns=df_asset_rets.columns,
+        dtype=float,
+    )
+    asset_risk = pd.DataFrame(index=time_index, columns=df_asset_rets.columns, dtype=float)
+
+    for t in time_index:
+        past_assets = df_asset_rets.loc[:t].iloc[-min_timestamps:]
+        past_factors = df_fact_rets.loc[:t].iloc[-min_timestamps:]
+        beta_matrix = robust_betas(past_assets, past_factors, min_timestamps)
+
+        # Compute residuals and variance
+        for asset in df_asset_rets.columns:
+            y = past_assets[asset].dropna()
+            x = past_factors.loc[y.index]
+            if len(y) >= min_timestamps:
+                X = sm.add_constant(x)
+                model = sm.OLS(y, X).fit()
+                resid_var = np.var(model.resid, ddof=1)
+                asset_risk.loc[t, asset] = resid_var
+
+        for factor in df_fact_rets.columns:
+            for asset in df_asset_rets.columns:
+                betas.loc[(t, factor), asset] = beta_matrix.loc[factor, asset]
+
+    return {"df_betas": betas, "df_asset_risk": asset_risk}
+
+# === Step 5: Load daily return data ===
+rets = pd.read_csv("us_stocks_1d_rets.csv", index_col=0, parse_dates=[0])
+rets.index = pd.to_datetime(rets.index, utc=True)
+rets.index.name = "date"
+
+# === Step 6: Main execution ===
+sp500_df = get_sp500_symbols_and_sectors()
+sector_exposures = generate_sector_exposures(sp500_df)
+
+tickers = [t for t in sp500_df["symbol"] if t in rets.columns]
+if "SPY" not in rets.columns:
+    raise ValueError("SPY not found in daily returns data.")
+
+df_asset_rets = rets[tickers]
+df_fact_rets = rets[["SPY"]]
+
+# === Step 7: Run daily model ===
+result = pit_robust_betas(
+    df_asset_rets=df_asset_rets,
+    df_fact_rets=df_fact_rets,
+    lambda_=None,
+    half_life=None,
+    min_timestamps=252
+)
+
+betas = result["df_betas"]
+risk = result["df_asset_risk"]
+spy_ret = df_fact_rets["SPY"]
+
+# === Step 8: Save outputs ===
+for ts in betas.index.levels[0]:
+    betas_ts = betas.loc[ts].transpose()
+    betas_ts.index.name = "asset"
+    betas_ts.to_csv(f"factorloadings_{ts.date()}.csv")
+
+    if ts in risk.index:
+        risk_ts = risk.loc[[ts]].transpose()
+        risk_ts.columns = ["resid_var"]
+        risk_ts.index.name = "asset"
+        risk_ts.to_csv(f"assetrisk_{ts.date()}.csv")
+
+spy_ret.to_csv("factorreturns.csv", header=True)
+sector_exposures.loc[tickers].to_csv("sector_exposures.csv")
+
+print("All files saved.")
