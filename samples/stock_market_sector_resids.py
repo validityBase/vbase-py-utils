@@ -157,7 +157,7 @@ plot_cumulative_residuals(
 )
 
 # Plot all the sources of returns for a stock.
-STOCK = "JPM"
+STOCK = "AAPL"
 # Build a DataFrame with the stock and its return components.
 df_component_rets = pd.DataFrame(
     {
@@ -172,3 +172,5 @@ df_component_rets = df_component_rets.dropna()
 plot_cumulative_residuals(df_component_rets, f"Cumulative Return Components: {STOCK}")
 # Print correlation matrix.
 print(df_component_rets.corr())
+# Print shares of variance explained by each component.
+print(df_component_rets.var() / df_component_rets["Stock Return"].var())
