@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from numpy.typing import NDArray
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -13,6 +14,36 @@ logger.addHandler(logging.NullHandler())
 
 # Threshold for near-zero variance in df_fact_rets.
 NEAR_ZERO_VARIANCE_THRESHOLD = 1e-10
+
+
+def check_min_timestamps_series(
+    arr: NDArray[np.floating], min_timestamps: int
+) -> tuple[NDArray[np.floating], NDArray[np.bool_]]:
+    """
+    Filter a numpy array based on minimum number of defined (non-NaN) values.
+
+    Args:
+        arr: Numpy array to filter
+        min_timestamps: Minimum number of defined values required
+
+    Returns:
+        tuple: Filtered array and boolean mask identifying non-NaN entries. If the
+               minimum defined values condition is not met, both elements are empty arrays.
+    """
+    # Check for NaN values.
+    mask = ~np.isnan(arr)
+    # Count the number of defined values.
+    defined_count = np.count_nonzero(mask)
+
+    # If the number of defined values is greater than or equal to the minimum number of timestamps,
+    # return the filtered array and mask.
+    if defined_count >= min_timestamps:
+        return arr[mask], mask
+
+    # Otherwise, return empty arrays.
+    empty_filtered = np.array([], dtype=arr.dtype)
+    empty_mask = np.array([], dtype=bool)
+    return empty_filtered, empty_mask
 
 
 def exponential_weights(
@@ -146,8 +177,18 @@ def robust_betas(
         y: np.ndarray = df_asset_rets[asset].values
         y_weighted: np.ndarray = y * sqrt_weights
 
-        x_w_const: pd.DataFrame = sm.add_constant(x_weighted)
-        rlm_model = sm.RLM(y_weighted, x_w_const, M=sm.robust.norms.HuberT())
+        # Check if there are enough defined values to perform the regression.
+        #  If so, drop any NaN values and continue.
+        y_filtered, valid_mask = check_min_timestamps_series(y_weighted, min_timestamps)
+        if y_filtered.size == 0:
+            # Not enough defined values to perform the regression.
+            #  Skip regression for this asset.
+            df_betas[asset] = np.nan
+            continue
+
+        # X is filtered according to the mask used to filter y.
+        x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[valid_mask])
+        rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
         rlm_results = rlm_model.fit()
 
         df_betas[asset] = rlm_results.params

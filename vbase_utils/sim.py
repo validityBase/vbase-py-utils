@@ -135,5 +135,8 @@ def sim(
             )
             raise ValueError(f"Error processing timestamp {timestamp}: {str(e)}") from e
 
-    # Combine all results into DataFrames
-    return {label: pd.concat(df_list) for label, df_list in results.items()}
+    # Combine all results into DataFrames. Use shared memory for concatenation.
+    return {
+        label: pd.concat(df_list, copy=False).copy()
+        for label, df_list in results.items()
+    }
