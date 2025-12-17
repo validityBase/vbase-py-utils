@@ -189,7 +189,11 @@ def robust_betas(
         # X is filtered according to the mask used to filter y.
         x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[valid_mask])
         rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
-        rlm_results = rlm_model.fit()
+        try:
+            rlm_results = rlm_model.fit()
+        except Exception as e:
+            logger.error("Error fitting RLM model for asset %s: %s", asset, e)
+            continue
 
         df_betas[asset] = rlm_results.params
 
