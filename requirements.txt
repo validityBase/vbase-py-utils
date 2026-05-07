@@ -2,6 +2,7 @@ boto3==1.37.30
 pandas==2.2.3
 pandas_market_calendars==4.6.1
 pylint==3.2.7
+scipy>=1.8,<1.16
 statsmodels==0.14.4
 tqdm==4.65.0
 yfinance==0.2.55
