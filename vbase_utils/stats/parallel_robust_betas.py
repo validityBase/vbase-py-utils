@@ -1,96 +1,72 @@
-"""Robust timeseries regression module"""
+"""Parallel Robust timeseries regression module"""
 
 import logging
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from numpy.typing import NDArray
+from joblib import Parallel, delayed
+
+from vbase_utils.stats.robust_betas import (
+    check_min_timestamps_series,
+    exponential_weights,
+    NEAR_ZERO_VARIANCE_THRESHOLD,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-# Threshold for near-zero variance in df_fact_rets.
-NEAR_ZERO_VARIANCE_THRESHOLD = 1e-10
-
-
-def check_min_timestamps_series(
-    arr: NDArray[np.floating], min_timestamps: int
-) -> tuple[NDArray[np.floating], NDArray[np.bool_]]:
-    """
-    Filter a numpy array based on minimum number of defined (non-NaN) values.
-
-    Args:
-        arr: Numpy array to filter
-        min_timestamps: Minimum number of defined values required
-
-    Returns:
-        tuple: Filtered array and boolean mask identifying non-NaN entries. If the
-               minimum defined values condition is not met, both elements are empty arrays.
-    """
-    # Check for NaN values.
-    mask = ~np.isnan(arr)
-    # Count the number of defined values.
-    defined_count = np.count_nonzero(mask)
-
-    # If the number of defined values is greater than or equal to the minimum number of timestamps,
-    # return the filtered array and mask.
-    if defined_count >= min_timestamps:
-        return arr[mask], mask
-
-    # Otherwise, return empty arrays.
-    empty_filtered = np.array([], dtype=arr.dtype)
-    empty_mask = np.array([], dtype=bool)
-    return empty_filtered, empty_mask
-
-
-def exponential_weights(
-    n: int,
-    half_life: float | None = None,
-    lambda_: float | None = None,
-) -> np.ndarray:
-    """Generate exponential decay weights for n time periods.
-
-    Either half_life or lambda_ must be provided.
-    If both are provided, lambda_ is used.
+def _compute_single_asset_beta(
+    asset: str,
+    df_asset_rets: pd.DataFrame,
+    x_weighted: pd.DataFrame,
+    sqrt_weights: np.ndarray,
+    min_timestamps: int,
+):
+    """Compute beta for a single asset - extracted for parallelization.
 
     Args:
-        n: Number of time periods.
-        half_life: Half-life in time units (e.g., days). Must be positive.
-        lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
+        asset: Asset name/column identifier
+        df_asset_rets: DataFrame of asset returns
+        x_weighted: Weighted factor returns DataFrame
+        sqrt_weights: Square root of exponential weights
+        min_timestamps: Minimum timestamps required for regression
 
     Returns:
-        Normalized exponential decay weights as a numpy array.
-
-    Raises:
-        ValueError: If neither half_life nor lambda_ is provided.
-        ValueError: If half_life is not positive or lambda_ is not between 0 and 1.
+        Tuple of (asset, params) where params is None if insufficient data.
     """
-    if half_life is None and lambda_ is None:
-        raise ValueError("Either half_life or lambda_ must be provided.")
-    if half_life is not None and half_life <= 0:
-        raise ValueError("half_life must be positive.")
-    if lambda_ is not None and not 0 < lambda_ < 1:
-        raise ValueError("lambda_ must be between 0 and 1.")
+    y = df_asset_rets[asset].values
+    y_weighted: np.ndarray = y * sqrt_weights
 
-    if lambda_ is None:
-        lambda_ = np.exp(np.log(0.5) / half_life)
+    y_weighted_filtered, y_valid_mask = check_min_timestamps_series(
+        y_weighted, min_timestamps
+    )
+    if y_weighted_filtered.size == 0:
+        return asset, None
 
-    weights: np.ndarray = lambda_ ** np.arange(n - 1, -1, -1)
-    return weights / np.sum(weights)  # normalize
+    y_weighted = y_weighted_filtered
+
+    x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[y_valid_mask])
+    # Statsmodels does not apply weights to constant, apply manually.
+    x_w_const["const"] = x_w_const["const"] * sqrt_weights[y_valid_mask]
+    rlm_model = sm.RLM(y_weighted, x_w_const, M=sm.robust.norms.HuberT())
+    rlm_results = rlm_model.fit()
+
+    return asset, rlm_results.params
 
 
 # The function must take a large number of arguments
 # and consequently has a large number of local variables.
 # pylint: disable=too-many-arguments, too-many-locals
-def robust_betas(
+def parallel_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
     half_life: float | None = None,
     lambda_: float | None = None,
     min_timestamps: int = 10,
+    n_jobs: int = -1,
 ) -> pd.DataFrame:
     """Perform robust regression (RLM) with exponential time-weighting.
 
@@ -108,6 +84,7 @@ def robust_betas(
             | 365            | 120                          |
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
+        n_jobs: Number of parallel jobs to run. -1 uses all available cores. Defaults to -1.
 
     Returns:
         DataFrame of shape (n_factors, n_assets) containing the computed betas.
@@ -173,26 +150,18 @@ def robust_betas(
     # Implement weighted regression for each asset
     # by multiplying the x and y matrices by the square root of the weights.
     x_weighted: pd.DataFrame = df_fact_rets.multiply(sqrt_weights, axis=0)
-    for asset in df_asset_rets.columns:
-        y: np.ndarray = df_asset_rets[asset].values
-        y_weighted: np.ndarray = y * sqrt_weights
 
-        # Check if there are enough defined values to perform the regression.
-        #  If so, drop any NaN values and continue.
-        y_filtered, valid_mask = check_min_timestamps_series(y_weighted, min_timestamps)
-        if y_filtered.size == 0:
-            # Not enough defined values to perform the regression.
-            #  Skip regression for this asset.
-            df_betas[asset] = np.nan
-            continue
+    # Use parallel processing for asset regressions
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_compute_single_asset_beta)(
+            asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps
+        )
+        for asset in df_asset_rets.columns
+    )
 
-        # X is filtered according to the mask used to filter y.
-        x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[valid_mask])
-        # Statsmodels does not apply weights to constant, apply manually.
-        x_w_const["const"] = x_w_const["const"] * sqrt_weights[valid_mask]
-        rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
-        rlm_results = rlm_model.fit()
-
-        df_betas[asset] = rlm_results.params
+    # Fill results back into DataFrame
+    for asset, params in results:
+        if params is not None:
+            df_betas[asset] = params
 
     return df_betas
