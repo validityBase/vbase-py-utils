@@ -136,7 +136,12 @@ def sim(
             raise ValueError(f"Error processing timestamp {timestamp}: {str(e)}") from e
 
     # Combine all results into DataFrames. Use shared memory for concatenation.
+    # Filter out empty and all-NaN DataFrames.
     return {
-        label: pd.concat(df_list, copy=False).copy()
+        label: pd.concat(
+            [df for df in df_list if not df.empty and not df.isna().all().all()],
+            copy=False,
+        ).copy()
         for label, df_list in results.items()
     }
+
