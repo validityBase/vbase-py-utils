@@ -1,20 +1,18 @@
 # AGENTS.md
 
-## Setup
-- GitHub Actions notes: [internal/specs/github-actions.md](internal/specs/github-actions.md)
-- Persistent agent memory: [internal/agents/memory/](internal/agents/memory/)
+Primary instructions are in [CLAUDE.md](CLAUDE.md) - read that first.
 
-## Workflow
-When making code, test, lint, or CI changes in this repo:
-1. Confirm the intended behavior before editing.
-2. Keep changes scoped to the relevant workflow, module, docs, or config.
-3. Update specs or operational docs when CI behavior changes.
-4. Run relevant validation, or list the exact commands that could not be run.
-5. Prepare a PR-ready summary with validation and follow-ups.
+## Key Pointers
 
-## GitHub Actions
-- Pin third-party actions to full commit SHAs.
-- Use shared `validityBase/vbase-github-actions` actions/workflows by reviewed version tags.
-- Prefer shared reusable workflows for repeated CI/lint flows.
-- Keep workflow permissions explicit and minimal.
-- Do not commit secrets, private tokens, webhook URLs, or generated `.env` payloads.
+- Persistent agent memory: [internal/agents/memory/MEMORY.md](internal/agents/memory/MEMORY.md)
+- GitHub Actions spec: [internal/specs/github-actions.md](internal/specs/github-actions.md)
+
+## Agent Notes
+
+- Keep code, dependency, and workflow changes scoped.
+- Update internal specs or memory when CI behavior, dependency policy, or
+  repository conventions change.
+- Run relevant validation, or list the exact commands and failures when local
+  environment limits prevent a clean run.
+- Do not commit secrets, private tokens, webhook URLs, generated `.env` files, or
+  local virtual environment contents.
