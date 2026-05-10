@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   run-unit-tests:
@@ -14,15 +13,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
-        with:
-          python-version: "3.11"
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # actions/checkout v5.0.1
 
       - name: Install dependencies
-        uses: ./.github/actions/setup-python-deps
+        uses: validityBase/vbase-github-actions/.github/actions/setup-python-deps@v1
+        with:
+          requirements-files: |
+            requirements-dev.txt
+          python-version: "3.11"
 
       - name: Run unit tests
         run: |

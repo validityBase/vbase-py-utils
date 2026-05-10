@@ -6,24 +6,12 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   run-pylint:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        uses: ./.github/actions/setup-python-deps
-
-      - name: Run pylint
-        run: |
-          pylint $(git ls-files '*.py')
+    uses: validityBase/vbase-github-actions/.github/workflows/python-lint.yml@v1
+    with:
+      python-version: "3.11"
+      requirements-files: |
+        requirements-dev.txt
+      pylint-command: pylint $(git ls-files '*.py')
