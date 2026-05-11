@@ -1,10 +1,26 @@
 # GitHub Actions
 
 ## Policy
+
 - Third-party actions are pinned by full commit SHA for reproducibility.
 - Shared vBase-owned actions and reusable workflows use `validityBase/vbase-github-actions` with reviewed release tags such as `@v1`.
 - Workflow permissions are declared explicitly and kept minimal.
 - Secrets must come from GitHub Secrets or deployment configuration, never from committed files or logs.
+- Workflows install `requirements-dev.txt`, which includes runtime dependencies
+  from `requirements.txt`.
+- Python version is standardized on 3.11 in CI.
+
+## Local Validation
+
+Use the same dependency file as CI:
+
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests
+pylint $(git ls-files '*.py')
+```
 
 ## Workflows
 
