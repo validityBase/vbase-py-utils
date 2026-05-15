@@ -18,7 +18,8 @@ The package contains common Python utilities used across projects.
 
 3. Install dependencies:
     ```bash
-    pip install -r requirements-dev.txt
+    python -m pip install --require-hashes -r requirements-dev.txt
+    python -m pip install --no-deps --no-build-isolation -e .
     ```
 
 4. For vBase API access, set up environment variables:
@@ -41,3 +42,13 @@ Create a `.env` file in the project root with the following variables:
    pre-commit run --all-files
    pylint $(git ls-files '*.py')
    ```
+
+## Updating Dependencies
+
+Runtime and development dependencies are managed through human-edited `.in`
+files and generated hash-locked `.txt` files. Edit the relevant `.in` file,
+regenerate the matching lock with `pip-compile --generate-hashes`, and commit
+both files. Do not edit generated lock files by hand.
+
+See [internal/specs/python-dependency-hashes.md](internal/specs/python-dependency-hashes.md)
+for the exact commands.

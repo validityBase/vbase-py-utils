@@ -14,4 +14,5 @@ jobs:
       python-version: "3.11"
       requirements-files: |
         requirements-dev.txt
+      require-hashes: true
       pylint-command: pylint $(git ls-files '*.py')
