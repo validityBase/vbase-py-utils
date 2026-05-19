@@ -8,13 +8,51 @@ import pandas as pd
 from vbase_utils.stats.robust_betas import robust_betas
 
 # Constants for test data generation
-# Standard deviation of factor returns
 STD_FACT_RETS = 0.01
-# Standard deviation of asset returns
 STD_ASSET_RETS = 0.005
-
-# Default delta for floating point comparisons
 DEFAULT_DELTA = 0.2
+
+
+def make_single_asset_ret_frames(
+    spy_returns: np.ndarray, n_timestamps: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build single-asset and single-factor return DataFrames."""
+    asset_returns = 1.5 * spy_returns + np.random.normal(
+        0, STD_ASSET_RETS, n_timestamps
+    )
+    df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
+    df_fact_rets = pd.DataFrame({"SPY": spy_returns})
+    return df_asset_rets, df_fact_rets
+
+
+def make_multi_asset_ret_frames(
+    spy_returns: np.ndarray, n_timestamps: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build two-asset and single-factor return DataFrames."""
+    asset_returns_1 = 1.2 * spy_returns + np.random.normal(
+        0, STD_ASSET_RETS, n_timestamps
+    )
+    asset_returns_2 = 0.8 * spy_returns + np.random.normal(
+        0, STD_ASSET_RETS, n_timestamps
+    )
+    df_asset_rets = pd.DataFrame({"Asset1": asset_returns_1, "Asset2": asset_returns_2})
+    df_fact_rets = pd.DataFrame({"SPY": spy_returns})
+    return df_asset_rets, df_fact_rets
+
+
+def make_multi_factor_ret_frames(
+    spy_returns: np.ndarray, n_timestamps: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build single-asset and two-factor return DataFrames."""
+    iwm_returns = np.random.normal(0, STD_FACT_RETS, n_timestamps)
+    asset_returns = (
+        1.2 * spy_returns
+        + 0.5 * iwm_returns
+        + np.random.normal(0, STD_ASSET_RETS, n_timestamps)
+    )
+    df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
+    df_fact_rets = pd.DataFrame({"SPY": spy_returns, "IWM": iwm_returns})
+    return df_asset_rets, df_fact_rets
 
 
 class TestRobustBetas(unittest.TestCase):
@@ -29,11 +67,9 @@ class TestRobustBetas(unittest.TestCase):
 
     def test_single_asset(self):
         """Test beta estimation for a single ETF with known beta."""
-        asset_returns = 1.5 * self.spy_returns + np.random.normal(
-            0, STD_ASSET_RETS, self.n_timestamps
+        df_asset_rets, df_fact_rets = make_single_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
         )
-        df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
-        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         self.assertAlmostEqual(
             beta_matrix.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
@@ -41,16 +77,9 @@ class TestRobustBetas(unittest.TestCase):
 
     def test_multiple_assets(self):
         """Test beta estimation for multiple ETFs with known betas."""
-        asset_returns_1 = 1.2 * self.spy_returns + np.random.normal(
-            0, STD_ASSET_RETS, self.n_timestamps
+        df_asset_rets, df_fact_rets = make_multi_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
         )
-        asset_returns_2 = 0.8 * self.spy_returns + np.random.normal(
-            0, STD_ASSET_RETS, self.n_timestamps
-        )
-        df_asset_rets = pd.DataFrame(
-            {"Asset1": asset_returns_1, "Asset2": asset_returns_2}
-        )
-        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         self.assertAlmostEqual(
             beta_matrix.loc["SPY", "Asset1"], 1.2, delta=DEFAULT_DELTA
@@ -61,14 +90,9 @@ class TestRobustBetas(unittest.TestCase):
 
     def test_multiple_factors(self):
         """Test beta estimation with multiple factors in df_fact_rets."""
-        iwm_returns = np.random.normal(0, STD_FACT_RETS, self.n_timestamps)
-        asset_returns = (
-            1.2 * self.spy_returns
-            + 0.5 * iwm_returns
-            + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+        df_asset_rets, df_fact_rets = make_multi_factor_ret_frames(
+            self.spy_returns, self.n_timestamps
         )
-        df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
-        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns, "IWM": iwm_returns})
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         self.assertAlmostEqual(
             beta_matrix.loc["SPY", "Asset1"], 1.2, delta=DEFAULT_DELTA
@@ -79,11 +103,9 @@ class TestRobustBetas(unittest.TestCase):
 
     def test_lambda_parameter(self):
         """Test beta estimation using lambda_ instead of half_life."""
-        asset_returns = 1.5 * self.spy_returns + np.random.normal(
-            0, STD_ASSET_RETS, self.n_timestamps
+        df_asset_rets, df_fact_rets = make_single_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
         )
-        df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
-        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, lambda_=0.985)
         self.assertAlmostEqual(
             beta_matrix.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
@@ -103,6 +125,22 @@ class TestRobustBetas(unittest.TestCase):
         )
         df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
         df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
+        with self.assertRaises(ValueError):
+            robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+
+    def test_mismatched_index(self):
+        """Test handling of df_asset_rets and df_fact_rets with different index."""
+        asset_returns = 1.5 * self.spy_returns + np.random.normal(
+            0, STD_ASSET_RETS, self.n_timestamps
+        )
+        df_asset_rets = pd.DataFrame(
+            {"Asset1": asset_returns},
+            index=pd.date_range("2023-01-01", periods=self.n_timestamps),
+        )
+        df_fact_rets = pd.DataFrame(
+            {"SPY": self.spy_returns},
+            index=pd.date_range("2023-02-01", periods=self.n_timestamps),
+        )
         with self.assertRaises(ValueError):
             robust_betas(df_asset_rets, df_fact_rets, half_life=30)
 
@@ -168,14 +206,18 @@ class TestRobustBetas(unittest.TestCase):
 
     def test_with_nan_asset_returns(self):
         """NaN in asset returns must not cause shape mismatch when weighting const column."""
-        asset_returns = np.concatenate([
-            np.full(20, np.nan),
-            1.5 * self.spy_returns[20:] + np.random.normal(0, STD_ASSET_RETS, 80),
-        ])
+        asset_returns = np.concatenate(
+            [
+                np.full(20, np.nan),
+                1.5 * self.spy_returns[20:] + np.random.normal(0, STD_ASSET_RETS, 80),
+            ]
+        )
         df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
         df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
-        self.assertAlmostEqual(beta_matrix.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA)
+        self.assertAlmostEqual(
+            beta_matrix.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
+        )
 
 
 if __name__ == "__main__":
