@@ -232,7 +232,7 @@ class TestPitRobustBetas(unittest.TestCase):
         self.assertAlmostEqual(actual_resid, expected_resid, delta=DEFAULT_DELTA)
 
     def test_fill_missing_betas(self):
-        """fill_missing_betas=True replaces NaN betas with 1.0 when at least one asset has valid betas."""
+        """fill_missing_betas=True replaces NaN betas with 1.0 when valid betas exist."""
         n = 60
         dates = pd.date_range("2023-01-01", periods=n)
         np.random.seed(99)
@@ -243,13 +243,18 @@ class TestPitRobustBetas(unittest.TestCase):
         asset1 = 1.5 * spy_rets + np.random.normal(0, STD_ASSET_RETS, n)
         # Asset2: NaN for first 40 timestamps → only 1-9 valid observations at timestamps 40-48
         asset2_vals = np.full(n, np.nan)
-        asset2_vals[40:] = 0.8 * spy_rets.values[40:] + np.random.normal(0, STD_ASSET_RETS, 20)
+        asset2_vals[40:] = 0.8 * spy_rets.values[40:] + np.random.normal(
+            0, STD_ASSET_RETS, 20
+        )
         asset2 = pd.Series(asset2_vals, index=dates)
         df_asset_rets = pd.DataFrame({"Asset1": asset1, "Asset2": asset2})
 
         # Without fill: timestamps 40-48 (Asset2 has <10 valid obs) → Asset2 beta is NaN
         results_no_fill = pit_robust_betas(
-            df_asset_rets, df_fact_rets, half_life=30, min_timestamps=10,
+            df_asset_rets,
+            df_fact_rets,
+            half_life=30,
+            min_timestamps=10,
             fill_missing_betas=False,
         )
         mid_date = dates[45]  # Asset2 has 6 valid obs here, insufficient
@@ -258,13 +263,18 @@ class TestPitRobustBetas(unittest.TestCase):
 
         # With fill: Asset2 NaN betas are replaced with 1.0
         results_with_fill = pit_robust_betas(
-            df_asset_rets, df_fact_rets, half_life=30, min_timestamps=10,
+            df_asset_rets,
+            df_fact_rets,
+            half_life=30,
+            min_timestamps=10,
             fill_missing_betas=True,
         )
         betas_with_fill = results_with_fill["df_betas"].xs(mid_date)
         self.assertEqual(betas_with_fill.loc["SPY", "Asset2"], 1.0)
         # Asset1 betas should still be real (not 1.0)
-        self.assertAlmostEqual(betas_with_fill.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA)
+        self.assertAlmostEqual(
+            betas_with_fill.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
+        )
 
 
 if __name__ == "__main__":

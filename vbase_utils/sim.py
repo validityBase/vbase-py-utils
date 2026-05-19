@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+# Extra variables/branch necessary for concatenation to properly ignore all-NA dataframes.
+# and retain rows where the callback returned NaN. Disable these pylint checks.
+# pylint: disable=too-many-locals, too-many-branches
 def sim(
     data: Dict[str, pd.DataFrame | pd.Series],
     callback: Callable[
@@ -136,12 +139,10 @@ def sim(
             raise ValueError(f"Error processing timestamp {timestamp}: {str(e)}") from e
 
     # Combine all results into DataFrames. Use shared memory for concatenation.
-    # Filter out empty and all-NaN DataFrames.
-    return {
-        label: pd.concat(
-            [df for df in df_list if not df.empty and not df.isna().all().all()],
-            copy=False,
-        ).copy()
-        for label, df_list in results.items()
-    }
-
+    # Filter out empty DataFrames only; retain rows where the callback returned NaN.
+    combined: Dict[str, pd.DataFrame] = {}
+    for label, df_list in results.items():
+        frames = [df for df in df_list if not df.empty]
+        if frames:
+            combined[label] = pd.concat(frames, copy=False).copy()
+    return combined
