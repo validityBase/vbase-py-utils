@@ -117,7 +117,7 @@ def _validate_beta_inputs(
 
     n_timestamps, _ = df_asset_rets.shape
     df_betas: pd.DataFrame = pd.DataFrame(
-        index=df_fact_rets.columns, columns=df_asset_rets.columns
+        index=df_fact_rets.columns, columns=df_asset_rets.columns, dtype=float
     )
 
     # Check minimum timestamps.

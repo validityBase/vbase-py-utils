@@ -22,7 +22,7 @@ def sim(
     ],
     time_index: pd.DatetimeIndex,
     progress: bool = False,
-) -> Dict[str, pd.DataFrame | pd.Series]:
+) -> Dict[str, pd.DataFrame]:
     """Simulate processing of time series data using a callback function.
 
     This function simulates processing of time series data by:
@@ -42,9 +42,9 @@ def sim(
         progress: Whether to show a progress bar during simulation. Defaults to False.
 
     Returns:
-        Dictionary mapping labels to DataFrames and/or Series
-        containing the results of the callback function for each timestamp.
-        Each index will match the provided time_index.
+        Dictionary mapping labels to DataFrames containing the results of the callback
+        function for each timestamp. Labels whose callback results were always empty are
+        omitted from the returned dictionary.
 
     Raises:
         ValueError: If any input data object doesn't have a DatetimeIndex.
