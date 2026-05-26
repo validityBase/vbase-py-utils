@@ -231,6 +231,23 @@ class TestPitRobustBetas(unittest.TestCase):
         actual_resid = results["df_asset_resids"].loc[timestamp, "Asset1"]
         self.assertAlmostEqual(actual_resid, expected_resid, delta=DEFAULT_DELTA)
 
+    def test_rebalance_before_data_does_not_crash(self):
+        """Test that no crash occurs when rebalance timestamps precede all data."""
+        # All rebalance dates are before the data starts (2023-01-01),
+        # so sim() skips the callback for every timestamp and returns {}.
+        # Previously caused KeyError: 'betas' at sim_results["betas"].
+        early_dates = pd.date_range("2022-01-01", periods=5)
+
+        results = pit_robust_betas(
+            self.df_asset_rets,
+            self.df_fact_rets,
+            half_life=30,
+            rebalance_time_index=early_dates,
+        )
+
+        self.assertIn("df_betas", results)
+        self.assertTrue(results["df_betas"].isna().all().all())
+
     def test_fill_missing_betas(self):
         """fill_missing_betas=True replaces NaN betas with 1.0 when valid betas exist."""
         n = 60

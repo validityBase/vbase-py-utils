@@ -5,54 +5,16 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from tests.stats._robust_betas_fixtures import (
+    STD_ASSET_RETS,
+    STD_FACT_RETS,
+    make_multi_asset_ret_frames,
+    make_multi_factor_ret_frames,
+    make_single_asset_ret_frames,
+)
 from vbase_utils.stats.robust_betas import robust_betas
 
-# Constants for test data generation
-STD_FACT_RETS = 0.01
-STD_ASSET_RETS = 0.005
 DEFAULT_DELTA = 0.2
-
-
-def make_single_asset_ret_frames(
-    spy_returns: np.ndarray, n_timestamps: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build single-asset and single-factor return DataFrames."""
-    asset_returns = 1.5 * spy_returns + np.random.normal(
-        0, STD_ASSET_RETS, n_timestamps
-    )
-    df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
-    df_fact_rets = pd.DataFrame({"SPY": spy_returns})
-    return df_asset_rets, df_fact_rets
-
-
-def make_multi_asset_ret_frames(
-    spy_returns: np.ndarray, n_timestamps: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build two-asset and single-factor return DataFrames."""
-    asset_returns_1 = 1.2 * spy_returns + np.random.normal(
-        0, STD_ASSET_RETS, n_timestamps
-    )
-    asset_returns_2 = 0.8 * spy_returns + np.random.normal(
-        0, STD_ASSET_RETS, n_timestamps
-    )
-    df_asset_rets = pd.DataFrame({"Asset1": asset_returns_1, "Asset2": asset_returns_2})
-    df_fact_rets = pd.DataFrame({"SPY": spy_returns})
-    return df_asset_rets, df_fact_rets
-
-
-def make_multi_factor_ret_frames(
-    spy_returns: np.ndarray, n_timestamps: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build single-asset and two-factor return DataFrames."""
-    iwm_returns = np.random.normal(0, STD_FACT_RETS, n_timestamps)
-    asset_returns = (
-        1.2 * spy_returns
-        + 0.5 * iwm_returns
-        + np.random.normal(0, STD_ASSET_RETS, n_timestamps)
-    )
-    df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
-    df_fact_rets = pd.DataFrame({"SPY": spy_returns, "IWM": iwm_returns})
-    return df_asset_rets, df_fact_rets
 
 
 class TestRobustBetas(unittest.TestCase):

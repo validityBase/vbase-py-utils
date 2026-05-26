@@ -188,6 +188,48 @@ class TestSim(unittest.TestCase):
             result["columns"]["cols"].iloc[4], "early_col,late_col,mid_col"
         )  # All columns at t=4
 
+    def test_callback_returns_empty_series(self):
+        """Test that a callback returning an empty Series does not crash."""
+
+        # pylint: disable=unused-argument
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            return {"weights": pd.Series([], dtype=float)}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        self.assertIsInstance(result, dict)
+        self.assertNotIn("weights", result)
+
+    def test_callback_returns_empty_dataframe(self):
+        """Test that a callback returning an empty DataFrame does not crash."""
+
+        # pylint: disable=unused-argument
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            return {"predictions": pd.DataFrame()}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        self.assertIsInstance(result, dict)
+        self.assertNotIn("predictions", result)
+
+    def test_callback_returns_empty_for_early_timestamps(self):
+        """Test that only non-empty callback results appear in output."""
+        cutoff = self.dates[2]  # 2023-01-03; first 2 timestamps return empty
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            latest_ts = data["df1"].index[-1]
+            if latest_ts < cutoff:
+                return {"result": pd.Series([], dtype=float)}
+            return {"result": pd.Series([data["df1"]["A"].iloc[-1]], index=["value"])}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        self.assertIn("result", result)
+        self.assertEqual(len(result["result"]), 3)
+        self.assertEqual(result["result"].index[0], cutoff)
+
 
 if __name__ == "__main__":
     unittest.main()

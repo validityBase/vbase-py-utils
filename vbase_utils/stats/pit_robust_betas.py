@@ -144,7 +144,8 @@ def pit_robust_betas(
             progress=progress,
         )
         # Fill in the betas DataFrame with the actual values from the simulation.
-        results["betas"].update(sim_results["betas"])
+        if "betas" in sim_results:
+            results["betas"].update(sim_results["betas"])
 
     # Calculate residuals using matrix operations.
 

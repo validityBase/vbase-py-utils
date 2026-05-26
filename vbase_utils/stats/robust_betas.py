@@ -139,7 +139,7 @@ def _validate_beta_inputs(
     return n_timestamps, df_betas, True
 
 
-def _prepare_weighted_regression_inputs(
+def prepare_weighted_regression_inputs(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
     half_life: float | None,
@@ -196,11 +196,13 @@ def robust_betas(
         DataFrame of shape (n_factors, n_assets) containing the computed betas.
 
     Raises:
-        ValueError: If inputs are empty, have insufficient data, mismatched rows,
-            excessive NaNs, or near-zero variance in df_fact_rets.
+        ValueError: If inputs are empty, have mismatched rows, excessive NaNs,
+            or near-zero variance in df_fact_rets.
+            Note: insufficient timestamps (< min_timestamps) returns an all-NaN
+            beta matrix with a warning rather than raising.
     """
-    # _prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
-    df_betas, sqrt_weights, x_weighted = _prepare_weighted_regression_inputs(
+    # prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
+    df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
         df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
     )
     # If not enough timestamps, return the empty beta matrix.

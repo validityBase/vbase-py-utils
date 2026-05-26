@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-# Extra variables/branch necessary for concatenation to properly ignore all-NA dataframes.
+# Extra variables/branch necessary for concatenation to keep all-NA frames
 # and retain rows where the callback returned NaN. Disable these pylint checks.
 # pylint: disable=too-many-locals, too-many-branches
 def sim(
@@ -127,7 +127,8 @@ def sim(
                 else:
                     # If we have a DataFrame, add the timstamp index.
                     df_result = pd.concat([result], keys=[timestamp], names=["t", None])
-                results[label].append(df_result)
+                if not df_result.empty:
+                    results[label].append(df_result)
 
         except Exception as e:
             logger.error(

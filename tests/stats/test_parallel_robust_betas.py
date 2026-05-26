@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from tests.stats.test_robust_betas import (
+from tests.stats._robust_betas_fixtures import (
     STD_ASSET_RETS,
     STD_FACT_RETS,
     make_multi_asset_ret_frames,
