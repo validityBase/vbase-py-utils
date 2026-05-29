@@ -128,7 +128,7 @@ def _validate_beta_inputs(
             min_timestamps,
         )
         # Not enough timestamps to perform regression.
-        # Return the timestamp count and empty beta matrix.
+        # Return the timestamp count and all-NaN beta matrix.
         return n_timestamps, df_betas, False
 
     # Check for near-zero variance in df_fact_rets.
@@ -205,7 +205,7 @@ def robust_betas(
     df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
         df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
     )
-    # If not enough timestamps, return the empty beta matrix.
+    # If not enough timestamps, return the all-NaN beta matrix.
     if sqrt_weights is None or x_weighted is None:
         return df_betas
 

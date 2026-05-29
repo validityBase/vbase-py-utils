@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-# Extra variables/branch necessary for concatenation to keep all-NA frames
-# and retain rows where the callback returned NaN. Disable these pylint checks.
+# Extra variables/branches necessary to filter empty frames while retaining
+# rows where the callback returned NaN. Disable these pylint checks.
 # pylint: disable=too-many-locals, too-many-branches
 def sim(
     data: Dict[str, pd.DataFrame | pd.Series],
@@ -34,21 +34,23 @@ def sim(
     Args:
         data: Dictionary mapping labels to pandas DataFrames and/or Series
             containing time series data. All objects must have a DatetimeIndex.
-        callback: Function that processes the masked data and returns a dictionary of Series.
+        callback: Function that processes the masked data and returns a dictionary of results.
             The function should accept a dictionary of DataFrames/Series and return a dictionary
-            mapping labels to Series.
+            mapping labels to DataFrames or Series.
         time_index: DatetimeIndex specifying the simulation timestamps.
             The function will process data up to each timestamp in this index.
         progress: Whether to show a progress bar during simulation. Defaults to False.
 
     Returns:
-        Dictionary mapping labels to DataFrames containing the results of the callback
-        function for each timestamp. Labels whose callback results were always empty are
-        omitted from the returned dictionary.
+        Dictionary mapping labels to DataFrames containing the concatenated callback
+        results across all timestamps. Only labels returned by at least one callback
+        invocation are included. Timestamps where the callback returned an empty Series
+        contribute NaN rows; timestamps where the callback returned an empty DataFrame
+        contribute no rows.
 
     Raises:
         ValueError: If any input data object doesn't have a DatetimeIndex.
-        ValueError: If the callback function doesn't return a dictionary of Series.
+        ValueError: If the callback function doesn't return a dictionary of DataFrames or Series.
         ValueError: If the callback function raises an exception.
     """
     # Validate input data
@@ -92,7 +94,7 @@ def sim(
                 for label, obj in masked_data.items()
             }
 
-            # If all input or output data is empty, skip the callback.
+            # If all input data is empty, skip the callback.
             # This can happen if not enough data is available
             # at the current timestamp.
             if all(obj.empty for obj in masked_data.values()):
@@ -125,10 +127,9 @@ def sim(
                     # Turn a Series into a DataFrame with the timestamp time index
                     df_result = pd.DataFrame([result], index=[timestamp])
                 else:
-                    # If we have a DataFrame, add the timstamp index.
+                    # If we have a DataFrame, add the timestamp index.
                     df_result = pd.concat([result], keys=[timestamp], names=["t", None])
-                if not df_result.empty:
-                    results[label].append(df_result)
+                results[label].append(df_result)
 
         except Exception as e:
             logger.error(
@@ -139,11 +140,10 @@ def sim(
             )
             raise ValueError(f"Error processing timestamp {timestamp}: {str(e)}") from e
 
-    # Combine all results into DataFrames. Use shared memory for concatenation.
-    # Filter out empty DataFrames only; retain rows where the callback returned NaN.
+    # Concatenate all per-timestamp results for each label. Empty Series results
+    # contribute (1, 0) frames that become NaN rows when concat with valid frames.
+    # Empty DataFrame results contribute (0, 0) frames that add no rows.
     combined: Dict[str, pd.DataFrame] = {}
     for label, df_list in results.items():
-        frames = [df for df in df_list if not df.empty]
-        if frames:
-            combined[label] = pd.concat(frames, copy=False).copy()
+        combined[label] = pd.concat(df_list, copy=False).copy()
     return combined
