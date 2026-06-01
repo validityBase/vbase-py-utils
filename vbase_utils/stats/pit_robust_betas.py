@@ -27,6 +27,7 @@ def pit_robust_betas(
     fill_missing_betas: bool = False,
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
+    n_jobs: int = -1,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -49,7 +50,7 @@ def pit_robust_betas(
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
             If not provided, uses all timestamps from df_asset_rets.
         progress: Whether to show a progress bar during simulation. Defaults to False.
-
+        n_jobs: Number of jobs to run in parallel. Defaults to -1 (use all available cores).
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -102,6 +103,7 @@ def pit_robust_betas(
                 half_life=half_life,
                 lambda_=lambda_,
                 min_timestamps=min_timestamps,
+                n_jobs=n_jobs,
             )
         else:
             beta_matrix = robust_betas(
