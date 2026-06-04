@@ -9,8 +9,7 @@ from joblib import Parallel, delayed
 
 from vbase_utils.stats.robust_betas import (
     check_min_timestamps_series,
-    exponential_weights,
-    NEAR_ZERO_VARIANCE_THRESHOLD,
+    prepare_weighted_regression_inputs,
 )
 
 # Configure logging
@@ -90,66 +89,18 @@ def parallel_robust_betas(
         DataFrame of shape (n_factors, n_assets) containing the computed betas.
 
     Raises:
-        ValueError: If inputs are empty, have insufficient data, mismatched rows,
-            excessive NaNs, or near-zero variance in df_fact_rets.
+        ValueError: If inputs are empty, have mismatched rows, excessive NaNs,
+            or near-zero variance in df_fact_rets.
+            Note: insufficient timestamps (< min_timestamps) returns an all-NaN
+            beta matrix with a warning rather than raising.
     """
-    # Check for empty inputs
-    if df_asset_rets.empty:
-        logger.error("Input DataFrame df_asset_rets is empty.")
-        raise ValueError("Input DataFrame df_asset_rets is empty.")
-    if df_fact_rets.empty:
-        logger.error("Input DataFrame df_fact_rets is empty.")
-        raise ValueError("Input DataFrame df_fact_rets is empty.")
-
-    # Check for mismatched row counts
-    if df_asset_rets.shape[0] != df_fact_rets.shape[0]:
-        logger.error(
-            "Mismatched row counts: df_asset_rets has %d rows, df_fact_rets has %d rows.",
-            df_asset_rets.shape[0],
-            df_fact_rets.shape[0],
-        )
-        raise ValueError(
-            "Mismatched row counts: "
-            f"df_asset_rets has {df_asset_rets.shape[0]} rows, "
-            f"df_fact_rets has {df_fact_rets.shape[0]} rows."
-        )
-
-    # Make sure that the indices are the same.
-    # We do not know at this level what is the best way to combine and align
-    # the indices so must fail.
-    if not df_asset_rets.index.equals(df_fact_rets.index):
-        raise ValueError("df_asset_rets and df_fact_rets must have the same index.")
-
-    n_timestamps, _ = df_asset_rets.shape
-
-    df_betas: pd.DataFrame = pd.DataFrame(
-        index=df_fact_rets.columns, columns=df_asset_rets.columns
+    # prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
+    df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
+        df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
     )
-
-    # Check minimum timestamps
-    if n_timestamps < min_timestamps:
-        logger.warning(
-            "Insufficient data: %d timestamps available, minimum required is %d.",
-            n_timestamps,
-            min_timestamps,
-        )
-        # Return a DataFrame with all NaNs.
+    # If not enough timestamps, return the all-NaN beta matrix.
+    if sqrt_weights is None or x_weighted is None:
         return df_betas
-
-    # Check for near-zero variance in df_fact_rets
-    if df_fact_rets.var().min() < NEAR_ZERO_VARIANCE_THRESHOLD:
-        logger.error("One or more factors in df_fact_rets have near-zero variance.")
-        raise ValueError("One or more factors in df_fact_rets have near-zero variance.")
-
-    # Calculate weights
-    weights: np.ndarray = exponential_weights(
-        n_timestamps, half_life=half_life, lambda_=lambda_
-    )
-    sqrt_weights: np.ndarray = np.sqrt(weights)
-
-    # Implement weighted regression for each asset
-    # by multiplying the x and y matrices by the square root of the weights.
-    x_weighted: pd.DataFrame = df_fact_rets.multiply(sqrt_weights, axis=0)
 
     # Use parallel processing for asset regressions
     results = Parallel(n_jobs=n_jobs)(
