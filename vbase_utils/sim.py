@@ -43,10 +43,10 @@ def sim(
 
     Returns:
         Dictionary mapping labels to DataFrames containing the concatenated callback
-        results across all timestamps. Only labels returned by at least one callback
-        invocation are included. Timestamps where the callback returned an empty Series
-        contribute NaN rows; timestamps where the callback returned an empty DataFrame
-        contribute no rows.
+        results across all timestamps. Only labels with at least one non-empty callback
+        result are included; labels whose callback results are always empty are omitted
+        entirely. Empty Series or empty DataFrames returned by the callback contribute
+        no rows; non-empty results with NaN values do contribute rows.
 
     Raises:
         ValueError: If any input data object doesn't have a DatetimeIndex.
