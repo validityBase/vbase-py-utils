@@ -1,4 +1,9 @@
-"""Parallel Robust timeseries regression module"""
+"""Parallel Robust timeseries regression module.
+
+Note: ``pit_robust_betas`` no longer uses this asset-level parallel path; it
+parallelizes over rebalance dates instead (see ``_pit_betas_parallel``). This
+module is retained for backward compatibility for any direct importers.
+"""
 
 import logging
 
