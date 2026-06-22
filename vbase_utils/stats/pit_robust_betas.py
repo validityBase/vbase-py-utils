@@ -4,14 +4,9 @@ import logging
 from typing import Dict, Optional
 
 import pandas as pd
-from joblib import Parallel, delayed
-from tqdm import tqdm
 
 from vbase_utils.sim import sim
-from vbase_utils.stats._pit_betas_parallel import (
-    _betas_for_timestamp,
-    _init_blas_single_thread,
-)
+from vbase_utils.stats.parallel_robust_betas import parallel_robust_betas
 from vbase_utils.stats.robust_betas import robust_betas
 
 # Configure logging
@@ -48,15 +43,20 @@ def pit_robust_betas(
         half_life: Half-life in time units (e.g., days). Must be positive.
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
-        parallel: If True, parallelize the rebalance-date loop across processes via
-            joblib (one date per task), reusing the serial robust_betas() inside each
-            worker. Numerically identical to parallel=False. Defaults to False.
+        parallel: If True, fan the per-asset RLM fits out across processes via
+            parallel_robust_betas() (BLAS pinned to one thread per worker);
+            otherwise run them serially. Numerically identical either way.
+            Defaults to False.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
             least one asset has a valid beta. Defaults to False.
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
             If not provided, uses all timestamps from df_asset_rets.
         progress: Whether to show a progress bar during simulation. Defaults to False.
-        n_jobs: Number of jobs to run in parallel. Defaults to -1 (use all available cores).
+        n_jobs: Number of jobs to run in parallel when ``parallel=True``. Defaults to
+            -1 (use all available cores). Peak memory scales roughly linearly with the
+            worker count (each process re-imports pandas/numpy/statsmodels), so on wide
+            panels lower ``n_jobs`` (e.g. 6-8) to cap the memory footprint at some
+            throughput cost.
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -93,7 +93,7 @@ def pit_robust_betas(
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
 
-    # Define callback function for sim (serial path only).
+    # Define callback function for sim.
     def regression_callback(
         data: Dict[str, pd.DataFrame | pd.Series],
     ) -> Dict[str, pd.DataFrame | pd.Series]:
@@ -101,14 +101,26 @@ def pit_robust_betas(
         df_asset_rets = data["df_asset_rets"]
         df_fact_rets = data["df_fact_rets"]
 
-        # Run robust regression.
-        beta_matrix = robust_betas(
-            df_asset_rets,
-            df_fact_rets,
-            half_life=half_life,
-            lambda_=lambda_,
-            min_timestamps=min_timestamps,
-        )
+        # Run robust regression. When parallel, fan the per-asset RLM fits out
+        # across processes (BLAS pinned to one thread per worker); otherwise run
+        # them serially. Both produce identical betas.
+        if parallel:
+            beta_matrix = parallel_robust_betas(
+                df_asset_rets,
+                df_fact_rets,
+                half_life=half_life,
+                lambda_=lambda_,
+                min_timestamps=min_timestamps,
+                n_jobs=n_jobs,
+            )
+        else:
+            beta_matrix = robust_betas(
+                df_asset_rets,
+                df_fact_rets,
+                half_life=half_life,
+                lambda_=lambda_,
+                min_timestamps=min_timestamps,
+            )
         # Fill NA betas with 1.0. Only fills rows where at least one beta is not NA
         if fill_missing_betas:
             row_has_any = beta_matrix.notna().any(axis=1)
@@ -134,45 +146,21 @@ def pit_robust_betas(
     }
 
     # Run simulation only if there is sufficient data to produce any betas.
+    # The rebalance-date loop runs in sim(); when parallel=True the per-date
+    # callback fans the per-asset fits out across processes via
+    # parallel_robust_betas (BLAS pinned per worker). This keeps all cores busy
+    # without dispatch starvation -- benchmarks show no benefit from instead
+    # parallelizing over dates, so the simpler asset-level path is used.
     if len(df_asset_rets.index) > min_timestamps:
-        if parallel:
-            # Parallelize the rebalance-date loop: one substantial task per date,
-            # each masking its own window and running the serial robust_betas.
-            # This reproduces sim()'s "betas" output exactly while saturating cores.
-            iterable = (
-                tqdm(rebalance_time_index, desc="Simulating", unit="timestamp")
-                if progress
-                else rebalance_time_index
-            )
-            parallel_results = Parallel(
-                n_jobs=n_jobs, initializer=_init_blas_single_thread
-            )(
-                delayed(_betas_for_timestamp)(
-                    df_asset_rets,
-                    df_fact_rets,
-                    timestamp,
-                    half_life,
-                    lambda_,
-                    min_timestamps,
-                    fill_missing_betas,
-                )
-                for timestamp in iterable
-            )
-            # Drop skipped (empty-window) dates, then assemble by label exactly
-            # as sim() + the serial path would.
-            df_list = [result for _, result in parallel_results if result is not None]
-            if df_list:
-                results["betas"].update(pd.concat(df_list, copy=False).copy())
-        else:
-            sim_results = sim(
-                {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
-                regression_callback,
-                rebalance_time_index,
-                progress=progress,
-            )
-            # Fill in the betas DataFrame with the actual values from the simulation.
-            if "betas" in sim_results:
-                results["betas"].update(sim_results["betas"])
+        sim_results = sim(
+            {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
+            regression_callback,
+            rebalance_time_index,
+            progress=progress,
+        )
+        # Fill in the betas DataFrame with the actual values from the simulation.
+        if "betas" in sim_results:
+            results["betas"].update(sim_results["betas"])
 
     # Calculate residuals using matrix operations.
 

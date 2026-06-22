@@ -1,11 +1,14 @@
 """Parallel Robust timeseries regression module.
 
-Note: ``pit_robust_betas`` no longer uses this asset-level parallel path; it
-parallelizes over rebalance dates instead (see ``_pit_betas_parallel``). This
-module is retained for backward compatibility for any direct importers.
+Parallelizes the per-asset RLM fits across processes via joblib. Workers pin BLAS
+to a single thread (see :func:`_init_blas_single_thread`): without this, many
+worker processes each spawning default BLAS threads oversubscribe the machine and
+collapse throughput to roughly one effective core -- the actual cause of the slow
+parallel runs, independent of how the work is partitioned.
 """
 
 import logging
+import os
 
 import numpy as np
 import pandas as pd
@@ -20,6 +23,25 @@ from vbase_utils.stats.robust_betas import (
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+def _init_blas_single_thread() -> None:
+    """Worker initializer that pins BLAS to a single thread.
+
+    With one worker process per core, default per-process BLAS threading would
+    oversubscribe the machine (processes x BLAS threads). The RLM matrices are
+    tiny (1-2 factor columns) so BLAS does not multithread them anyway, but we
+    pin defensively; thread count affects scheduling only, never values. loky
+    spawns fresh workers, so setting the env here takes effect before numpy/BLAS
+    is imported in the worker.
+    """
+    for var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[var] = "1"
 
 
 def _compute_single_asset_beta(
@@ -107,8 +129,10 @@ def parallel_robust_betas(
     if sqrt_weights is None or x_weighted is None:
         return df_betas
 
-    # Use parallel processing for asset regressions
-    results = Parallel(n_jobs=n_jobs)(
+    # Use parallel processing for asset regressions. Pin BLAS to one thread per
+    # worker so n_jobs processes do not oversubscribe the machine with BLAS
+    # threads (the dominant cause of poor multi-core utilization here).
+    results = Parallel(n_jobs=n_jobs, initializer=_init_blas_single_thread)(
         delayed(_compute_single_asset_beta)(
             asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps
         )

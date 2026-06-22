@@ -1,8 +1,8 @@
-"""Equivalence tests for the date-level parallel path of pit_robust_betas.
+"""Equivalence tests for the parallel path of pit_robust_betas.
 
-The parallel=True path now parallelizes the rebalance-date loop (one task per
-date, reusing the serial robust_betas inside each worker). Its output must be
-identical to the untouched parallel=False (sim() + serial robust_betas) path.
+The parallel=True path fans the per-asset RLM fits out across processes via
+parallel_robust_betas (BLAS pinned per worker). Its output must be identical to
+the parallel=False (serial robust_betas) path.
 
 The gate attempts exact equality first; if cross-process floating-point
 nondeterminism makes it flaky it can be relaxed to atol=1e-6 (the tolerance used
