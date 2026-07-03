@@ -51,9 +51,9 @@ must not contain hash-locked pins. Development, test, lint, and lock-generation
 environments are managed through human-edited inputs in `requirements/src/` and
 generated hash-locked files in `requirements/lock/`.
 
-Edit the relevant `.in` file, regenerate the matching lock with
-`pip-compile --generate-hashes`, and commit both files. Do not edit generated
-lock files by hand.
+Edit the relevant `.in` file, regenerate the matching lock using the commands in
+`internal/specs/python-dependency-hashes.md`, and commit both files. Do not edit
+generated lock files by hand.
 
 See [internal/specs/python-dependency-hashes.md](internal/specs/python-dependency-hashes.md)
 for the exact commands.
