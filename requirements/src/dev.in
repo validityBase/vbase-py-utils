@@ -1,7 +1,8 @@
--r requirements.in
+-r ../../requirements.in
+-r tools.in
 
 black>=24.8.0
 matplotlib>=3.7.0
 pre-commit>=3.8.0
+pylint>=3.2.7,<3.3
 PyYAML>=6.0.2
-pip-tools

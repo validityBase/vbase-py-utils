@@ -6,10 +6,13 @@ This file is the minimal shared entry point for agentic work in this repository.
 
 - This repository is a Python 3.11 utility package. Keep changes small,
   tested, and consistent with the existing `unittest`, pylint, and Black style.
-- Runtime dependency inputs live in `requirements.in`; generated runtime locks
-  live in `requirements.txt`.
-- Development dependency inputs live in `requirements-dev.in`; generated
-  development locks live in `requirements-dev.txt`.
+- Published runtime dependency inputs live in `requirements.in` as abstract
+  ranges; do not generate a hash-locked runtime requirements file for package
+  metadata.
+- Development dependency inputs live in `requirements/src/dev.in`; generated
+  development locks live in `requirements/lock/dev.txt`.
+- Lock-generation tooling inputs live in `requirements/src/tools.in`; generated
+  tooling locks live in `requirements/lock/tools.txt`.
 - Install generated locks with `python -m pip install --require-hashes`.
 - `setup.py` reads `requirements.in` into `install_requires`, so runtime
   dependency changes affect downstream package consumers.

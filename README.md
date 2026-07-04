@@ -18,7 +18,7 @@ The package contains common Python utilities used across projects.
 
 3. Install dependencies:
     ```bash
-    python -m pip install --require-hashes -r requirements-dev.txt
+    python -m pip install --require-hashes -r requirements/lock/dev.txt
     python -m pip install --no-deps --no-build-isolation -e .
     ```
 
@@ -45,10 +45,15 @@ Create a `.env` file in the project root with the following variables:
 
 ## Updating Dependencies
 
-Runtime and development dependencies are managed through human-edited `.in`
-files and generated hash-locked `.txt` files. Edit the relevant `.in` file,
-regenerate the matching lock with `pip-compile --generate-hashes`, and commit
-both files. Do not edit generated lock files by hand.
+Published runtime dependencies are managed through human-edited ranges in
+`requirements.in`; this file is read by `setup.py` into package metadata and
+must not contain hash-locked pins. Development, test, lint, and lock-generation
+environments are managed through human-edited inputs in `requirements/src/` and
+generated hash-locked files in `requirements/lock/`.
+
+Edit the relevant `.in` file, regenerate the matching lock using the commands in
+`internal/specs/python-dependency-hashes.md`, and commit both files. Do not edit
+generated lock files by hand.
 
 See [internal/specs/python-dependency-hashes.md](internal/specs/python-dependency-hashes.md)
 for the exact commands.
