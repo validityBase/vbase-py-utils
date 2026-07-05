@@ -6,6 +6,7 @@ from typing import Dict, Optional
 import pandas as pd
 
 from vbase_utils.sim import sim
+from vbase_utils.stats.parallel_robust_betas import parallel_robust_betas
 from vbase_utils.stats.robust_betas import robust_betas
 
 # Configure logging
@@ -15,22 +16,25 @@ logger.addHandler(logging.NullHandler())
 
 # The function must take a large number of arguments
 # and consequently has a large number of local variables.
-# pylint: disable=too-many-arguments, too-many-locals
+# pylint: disable=too-many-arguments, too-many-locals, too-many-branches
 def pit_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
     half_life: Optional[float] = None,
     lambda_: Optional[float] = None,
     min_timestamps: int = 10,
+    parallel: bool = False,
+    fill_missing_betas: bool = False,
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
+    n_jobs: int = -1,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
     This function:
     1. Validates and aligns input data
     2. Uses sim() to run robust_betas() at each timestamp
-    3. Calculates residuals for t+1 using betas known at t
+    3. Calculates residuals at t using betas from t-1
     4. Returns both the betas and residuals as DataFrames
 
     Args:
@@ -39,23 +43,33 @@ def pit_robust_betas(
         half_life: Half-life in time units (e.g., days). Must be positive.
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
+        parallel: If True, fan the per-asset RLM fits out across processes via
+            parallel_robust_betas() (BLAS pinned to one thread per worker);
+            otherwise run them serially. Numerically identical either way.
+            Defaults to False.
+        fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
+            least one asset has a valid beta. Defaults to False.
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
             If not provided, uses all timestamps from df_asset_rets.
         progress: Whether to show a progress bar during simulation. Defaults to False.
-
+        n_jobs: Number of jobs to run in parallel when ``parallel=True``. Defaults to
+            -1 (use all available cores). Peak memory scales roughly linearly with the
+            worker count (each process re-imports pandas/numpy/statsmodels), so on wide
+            panels lower ``n_jobs`` (e.g. 6-8) to cap the memory footprint at some
+            throughput cost.
     Returns:
         Dictionary containing:
-        - 'df_betas': DataFrame of shape (n_timestamps, n_factors, n_assets) containing
-          the computed betas at each timestamp
-        - 'df_hedge_rets_by_fact': DataFrame of shape (n_timestamps, n_factors, n_assets) containing
-          the hedge returns by factor at each timestamp
+        - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
+          (n_timestamps * n_factors, n_assets) containing the computed betas at each timestamp
+        - 'df_hedge_rets_by_fact': DataFrame with MultiIndex (timestamp, factor) and shape
+          (n_timestamps * n_factors, n_assets) containing the hedge returns by factor
         - 'df_hedge_rets': DataFrame of shape (n_timestamps, n_assets) containing
-          the hedge returns at each timestamp
+          the total hedge returns at each timestamp
         - 'df_asset_resids': DataFrame of shape (n_timestamps, n_assets) containing
           the asset residuals at each timestamp
 
     Raises:
-        ValueError: If inputs are empty, have insufficient data, mismatched rows,
+        ValueError: If inputs are empty, have mismatched rows,
             or if timestamps don't align.
     """
     # Validate input data
@@ -79,7 +93,7 @@ def pit_robust_betas(
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
 
-    # Define callback function for sim
+    # Define callback function for sim.
     def regression_callback(
         data: Dict[str, pd.DataFrame | pd.Series],
     ) -> Dict[str, pd.DataFrame | pd.Series]:
@@ -87,21 +101,37 @@ def pit_robust_betas(
         df_asset_rets = data["df_asset_rets"]
         df_fact_rets = data["df_fact_rets"]
 
-        # Run robust regression
-        beta_matrix = robust_betas(
-            df_asset_rets,
-            df_fact_rets,
-            half_life=half_life,
-            lambda_=lambda_,
-            min_timestamps=min_timestamps,
-        )
+        # Run robust regression. When parallel, fan the per-asset RLM fits out
+        # across processes (BLAS pinned to one thread per worker); otherwise run
+        # them serially. Both produce identical betas.
+        if parallel:
+            beta_matrix = parallel_robust_betas(
+                df_asset_rets,
+                df_fact_rets,
+                half_life=half_life,
+                lambda_=lambda_,
+                min_timestamps=min_timestamps,
+                n_jobs=n_jobs,
+            )
+        else:
+            beta_matrix = robust_betas(
+                df_asset_rets,
+                df_fact_rets,
+                half_life=half_life,
+                lambda_=lambda_,
+                min_timestamps=min_timestamps,
+            )
+        # Fill NA betas with 1.0. Only fills rows where at least one beta is not NA
+        if fill_missing_betas:
+            row_has_any = beta_matrix.notna().any(axis=1)
+            beta_matrix.loc[row_has_any] = beta_matrix.loc[row_has_any].fillna(1.0)
 
         dict_ret = {
             "betas": beta_matrix,
         }
         return dict_ret
 
-    # Create NA Series for each asset's betas.
+    # Create all-NaN DataFrame for betas.
     # We will update this with the actual values from the simulation.
     asset_names = df_asset_rets.columns
     factor_names = list(df_fact_rets.columns)
@@ -115,7 +145,12 @@ def pit_robust_betas(
         )
     }
 
-    # Run simulation only for timestamps after min_timestamps.
+    # Run simulation only if there is sufficient data to produce any betas.
+    # The rebalance-date loop runs in sim(); when parallel=True the per-date
+    # callback fans the per-asset fits out across processes via
+    # parallel_robust_betas (BLAS pinned per worker). This keeps all cores busy
+    # without dispatch starvation -- benchmarks show no benefit from instead
+    # parallelizing over dates, so the simpler asset-level path is used.
     if len(df_asset_rets.index) > min_timestamps:
         sim_results = sim(
             {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
@@ -124,7 +159,8 @@ def pit_robust_betas(
             progress=progress,
         )
         # Fill in the betas DataFrame with the actual values from the simulation.
-        results["betas"].update(sim_results["betas"])
+        if "betas" in sim_results:
+            results["betas"].update(sim_results["betas"])
 
     # Calculate residuals using matrix operations.
 
@@ -141,9 +177,7 @@ def pit_robust_betas(
     # Forward fill betas along the timestamp index to match return timestamps.
     df_betas.ffill(inplace=True, axis=0)
 
-    # Shift the betas by 1 day.
-    # This ensures we use betas from t-1 to hedge returns at t
-    # and gives us the effective hedge weights at t.
+    # Shift betas by 1 period so returns at t are hedged using betas from t-1.
     df_hedge_weights = -1 * df_betas.shift(1)
 
     # Calculate the predicted returns.
@@ -160,7 +194,7 @@ def pit_robust_betas(
     # Sum across factors for each timestamp-asset combination, then unstack.
     df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(min_count=1)
 
-    # Calculate the resids.
+    # Calculate the residuals.
     df_asset_resids = df_asset_rets + df_hedge_rets
     # Set the index names.
     # df_asset_rets may not have the index name specified.

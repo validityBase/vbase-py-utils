@@ -1,0 +1,18 @@
+name: Run Pylint
+
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  run-pylint:
+    uses: validityBase/vbase-github-actions/.github/workflows/python-lint.yml@v1
+    with:
+      python-version: "3.11"
+      requirements-files: |
+        requirements/lock/dev.txt
+      require-hashes: true
+      pylint-command: pylint $(git ls-files '*.py')

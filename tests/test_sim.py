@@ -188,6 +188,52 @@ class TestSim(unittest.TestCase):
             result["columns"]["cols"].iloc[4], "early_col,late_col,mid_col"
         )  # All columns at t=4
 
+    def test_callback_returns_empty_series(self):
+        """Test that a callback returning an empty Series produces an empty DataFrame."""
+
+        # pylint: disable=unused-argument
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            return {"weights": pd.Series([], dtype=float)}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        self.assertIn("weights", result)
+        self.assertTrue(result["weights"].empty)
+        pd.testing.assert_index_equal(result["weights"].index, self.time_index)
+
+    def test_callback_returns_empty_dataframe(self):
+        """Test that a callback returning an empty DataFrame produces an empty DataFrame."""
+
+        # pylint: disable=unused-argument
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            return {"predictions": pd.DataFrame()}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        # Empty DataFrames carry no row index, so the output is empty with no index.
+        self.assertIn("predictions", result)
+        self.assertTrue(result["predictions"].empty)
+
+    def test_callback_returns_empty_for_early_timestamps(self):
+        """Test that empty Series results become NaN rows alongside valid rows."""
+        cutoff = self.dates[2]  # 2023-01-03; first 2 timestamps return empty
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            latest_ts = data["df1"].index[-1]
+            if latest_ts < cutoff:
+                return {"result": pd.Series([], dtype=float)}
+            return {"result": pd.Series([data["df1"]["A"].iloc[-1]], index=["value"])}
+
+        result = sim(self.sample_data, callback, self.time_index)
+
+        # All timestamps appear; empty-Series timestamps produce NaN rows.
+        self.assertIn("result", result)
+        self.assertEqual(len(result["result"]), len(self.time_index))
+        self.assertTrue(result["result"]["value"].iloc[:2].isna().all())
+        self.assertTrue(result["result"]["value"].iloc[2:].notna().all())
+
 
 if __name__ == "__main__":
     unittest.main()
