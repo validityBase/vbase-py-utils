@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # Add the parent directory to the Python path to allow importing vbase_utils
-# when running this scample interactively.
+# when running this sample interactively.
 # pylint: disable=wrong-import-position
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
