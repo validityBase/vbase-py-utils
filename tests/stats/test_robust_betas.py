@@ -169,7 +169,8 @@ class TestRobustBetas(unittest.TestCase):
         self.assertTrue(beta_matrix.isna().all().all())
 
     def test_rlm_fit_error_returns_nan_for_affected_asset(self):
-        """When RLM.fit() raises for one asset, function does not raise and that asset's betas are NaN."""
+        """When RLM.fit() raises for one asset,
+        the function does not raise and that asset's betas are NaN."""
         df_asset_rets, df_fact_rets = make_multi_asset_ret_frames(
             self.spy_returns, self.n_timestamps
         )
