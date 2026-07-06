@@ -214,7 +214,7 @@ def robust_betas(
         y_weighted: np.ndarray = y * sqrt_weights
 
         # Check if there are enough defined values to perform the regression.
-        #  If so, drop any NaN values and continue.
+        # If so, drop any NaN values and continue.
         y_filtered, valid_mask = check_min_timestamps_series(y_weighted, min_timestamps)
         if y_filtered.size == 0:
             # Not enough defined values to perform the regression.
