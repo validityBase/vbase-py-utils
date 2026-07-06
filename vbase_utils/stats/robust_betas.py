@@ -229,8 +229,8 @@ def robust_betas(
         rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
         try:
             rlm_results = rlm_model.fit()
-        except Exception as e:
-            logger.error("Error fitting RLM model for asset %s: %s", asset, e)
+        except (np.linalg.LinAlgError, ZeroDivisionError) as e:
+            logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
             continue
 
         df_betas[asset] = rlm_results.params

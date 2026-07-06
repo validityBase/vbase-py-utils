@@ -151,7 +151,7 @@ def pit_robust_betas(
     # parallel_robust_betas (BLAS pinned per worker). This keeps all cores busy
     # without dispatch starvation -- benchmarks show no benefit from instead
     # parallelizing over dates, so the simpler asset-level path is used.
-    if len(df_asset_rets.index) > min_timestamps:
+    if len(df_asset_rets.index) >= min_timestamps:
         sim_results = sim(
             {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
             regression_callback,

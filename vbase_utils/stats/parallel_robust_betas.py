@@ -132,7 +132,9 @@ def parallel_robust_betas(
     # Use parallel processing for asset regressions. Pin BLAS to one thread per
     # worker so n_jobs processes do not oversubscribe the machine with BLAS
     # threads (the dominant cause of poor multi-core utilization here).
-    results = Parallel(n_jobs=n_jobs, initializer=_init_blas_single_thread, inner_max_num_threads=1)(
+    results = Parallel(
+        n_jobs=n_jobs, initializer=_init_blas_single_thread, inner_max_num_threads=1
+    )(
         delayed(_compute_single_asset_beta)(
             asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps
         )

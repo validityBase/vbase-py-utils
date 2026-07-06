@@ -1,9 +1,11 @@
 """Unit tests for the robust timeseries regression module"""
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as real_sm
 
 from tests.stats._robust_betas_fixtures import (
     STD_ASSET_RETS,
@@ -165,6 +167,32 @@ class TestRobustBetas(unittest.TestCase):
         )
         # Check that the betas are all NaN.
         self.assertTrue(beta_matrix.isna().all().all())
+
+    def test_rlm_fit_error_returns_nan_for_affected_asset(self):
+        """When RLM.fit() raises for one asset, function does not raise and that asset's betas are NaN."""
+        df_asset_rets, df_fact_rets = make_multi_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
+        )
+
+        call_count = [0]
+        real_RLM = real_sm.RLM
+
+        def rlm_side_effect(*args, **kwargs):
+            if call_count[0] == 0:
+                call_count[0] += 1
+                mock = MagicMock()
+                mock.fit.side_effect = np.linalg.LinAlgError("singular matrix")
+                return mock
+            call_count[0] += 1
+            return real_RLM(*args, **kwargs)
+
+        with patch(
+            "vbase_utils.stats.robust_betas.sm.RLM", side_effect=rlm_side_effect
+        ):
+            beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+
+        self.assertTrue(beta_matrix["Asset1"].isna().all())
+        self.assertFalse(beta_matrix["Asset2"].isna().all())
 
     def test_with_nan_asset_returns(self):
         """NaN in asset returns must not cause shape mismatch when weighting const column."""

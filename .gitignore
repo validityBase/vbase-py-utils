@@ -17,3 +17,10 @@ dist/
 
 # Dagster
 .tmp_dagster_*/
+
+# Claude Code local settings
+.claude/settings.json
+.claude/settings.local.json
+
+# Codex local settings
+.codex
