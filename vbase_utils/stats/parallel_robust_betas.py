@@ -61,7 +61,8 @@ def _compute_single_asset_beta(
         min_timestamps: Minimum timestamps required for regression
 
     Returns:
-        Tuple of (asset, params) where params is None if insufficient data.
+        Tuple of (asset, params) where params is None if insufficient data
+        or the RLM fit raises a linear-algebra/zero-division error.
     """
     y = df_asset_rets[asset].values
     y_weighted: np.ndarray = y * sqrt_weights
@@ -78,7 +79,11 @@ def _compute_single_asset_beta(
     # Statsmodels does not apply weights to constant, apply manually.
     x_w_const["const"] = x_w_const["const"] * sqrt_weights[y_valid_mask]
     rlm_model = sm.RLM(y_weighted, x_w_const, M=sm.robust.norms.HuberT())
-    rlm_results = rlm_model.fit()
+    try:
+        rlm_results = rlm_model.fit()
+    except (np.linalg.LinAlgError, ZeroDivisionError) as e:
+        logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
+        return asset, None
 
     return asset, rlm_results.params
 

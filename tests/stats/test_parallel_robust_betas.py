@@ -1,9 +1,11 @@
 """Unit tests for parallel_robust_betas parity with robust_betas."""
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as real_sm
 
 from tests.stats._robust_betas_fixtures import (
     STD_ASSET_RETS,
@@ -98,6 +100,39 @@ class TestParallelRobustBetas(unittest.TestCase):
         df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
         df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
         _assert_parallel_matches_serial(df_asset_rets, df_fact_rets, half_life=30)
+
+    def test_rlm_fit_error_returns_nan_for_affected_asset(self):
+        """When RLM.fit() raises for one asset, parallel_robust_betas does not
+        raise and that asset's betas are NaN (parity with serial path).
+
+        Runs with n_jobs=1 so joblib executes in-process and the patch applies.
+        """
+        df_asset_rets, df_fact_rets = make_multi_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
+        )
+
+        call_count = [0]
+        real_RLM = real_sm.RLM
+
+        def rlm_side_effect(*args, **kwargs):
+            if call_count[0] == 0:
+                call_count[0] += 1
+                mock = MagicMock()
+                mock.fit.side_effect = np.linalg.LinAlgError("singular matrix")
+                return mock
+            call_count[0] += 1
+            return real_RLM(*args, **kwargs)
+
+        with patch(
+            "vbase_utils.stats.parallel_robust_betas.sm.RLM",
+            side_effect=rlm_side_effect,
+        ):
+            beta_matrix = parallel_robust_betas(
+                df_asset_rets, df_fact_rets, half_life=30, n_jobs=1
+            )
+
+        self.assertTrue(beta_matrix["Asset1"].isna().all())
+        self.assertFalse(beta_matrix["Asset2"].isna().all())
 
     def test_shared_validation_errors(self):
         """Parallel path raises the same validation errors as serial (shared setup)."""
