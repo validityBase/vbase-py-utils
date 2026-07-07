@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # Add the parent directory to the Python path to allow importing vbase_utils
-# when running this scample interactively.
+# when running this sample interactively.
 # pylint: disable=wrong-import-position
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
@@ -157,7 +157,7 @@ plot_cumulative_residuals(
 )
 
 # Plot all the sources of returns for a stock.
-STOCK = "JPM"
+STOCK = "AAPL"
 # Build a DataFrame with the stock and its return components.
 df_component_rets = pd.DataFrame(
     {
@@ -172,3 +172,5 @@ df_component_rets = df_component_rets.dropna()
 plot_cumulative_residuals(df_component_rets, f"Cumulative Return Components: {STOCK}")
 # Print correlation matrix.
 print(df_component_rets.corr())
+# Print shares of variance explained by each component.
+print(df_component_rets.var() / df_component_rets["Stock Return"].var())

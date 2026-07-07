@@ -214,7 +214,7 @@ def robust_betas(
         y_weighted: np.ndarray = y * sqrt_weights
 
         # Check if there are enough defined values to perform the regression.
-        #  If so, drop any NaN values and continue.
+        # If so, drop any NaN values and continue.
         y_filtered, valid_mask = check_min_timestamps_series(y_weighted, min_timestamps)
         if y_filtered.size == 0:
             # Not enough defined values to perform the regression.
@@ -227,7 +227,11 @@ def robust_betas(
         # Statsmodels does not apply weights to constant, apply manually.
         x_w_const["const"] = x_w_const["const"] * sqrt_weights[valid_mask]
         rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
-        rlm_results = rlm_model.fit()
+        try:
+            rlm_results = rlm_model.fit()
+        except (np.linalg.LinAlgError, ZeroDivisionError) as e:
+            logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
+            continue
 
         df_betas[asset] = rlm_results.params
 
