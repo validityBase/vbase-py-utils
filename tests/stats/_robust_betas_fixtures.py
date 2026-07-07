@@ -38,7 +38,7 @@ def make_multi_asset_ret_frames(
 
 
 def make_rlm_first_call_error_side_effect(real_rlm: Callable) -> Callable:
-    """Return a side-effect function that raises LinAlgError on the first RLM call.
+    """Return a side-effect function whose first RLM call returns a mock whose fit() raises LinAlgError.
 
     Subsequent calls delegate to *real_rlm* so that only one asset gets NaN betas.
     """
