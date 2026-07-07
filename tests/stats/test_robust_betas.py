@@ -1,7 +1,7 @@
 """Unit tests for the robust timeseries regression module"""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ from tests.stats._robust_betas_fixtures import (
     STD_FACT_RETS,
     make_multi_asset_ret_frames,
     make_multi_factor_ret_frames,
+    make_rlm_first_call_error_side_effect,
     make_single_asset_ret_frames,
 )
 from vbase_utils.stats.robust_betas import robust_betas
@@ -175,20 +176,9 @@ class TestRobustBetas(unittest.TestCase):
             self.spy_returns, self.n_timestamps
         )
 
-        call_count = [0]
-        real_RLM = real_sm.RLM
-
-        def rlm_side_effect(*args, **kwargs):
-            if call_count[0] == 0:
-                call_count[0] += 1
-                mock = MagicMock()
-                mock.fit.side_effect = np.linalg.LinAlgError("singular matrix")
-                return mock
-            call_count[0] += 1
-            return real_RLM(*args, **kwargs)
-
         with patch(
-            "vbase_utils.stats.robust_betas.sm.RLM", side_effect=rlm_side_effect
+            "vbase_utils.stats.robust_betas.sm.RLM",
+            side_effect=make_rlm_first_call_error_side_effect(real_sm.RLM),
         ):
             beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
 
