@@ -21,7 +21,9 @@ The per-fit numerics are identical to the statsmodels path (bit-faithful; the
 fit is :func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`).
 """
 
+import logging
 import os
+import sys
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -30,11 +32,15 @@ from numpy.typing import NDArray
 from vbase_utils.stats._huber_rlm import fit_huber_rlm_params
 
 
-def _init_blas_single_thread() -> None:
-    """Worker initializer pinning BLAS to one thread (kept lean, no imports).
+def _init_worker() -> None:
+    """joblib worker initializer: pin BLAS to one thread and surface worker logs.
 
-    Mirrors parallel_robust_betas._init_blas_single_thread but lives here so the
-    worker's import graph stays statsmodels-free.
+    Runs once per worker at pool creation (not per fit), so it adds no per-fit
+    cost. loky forwards worker stderr to the parent, so routing worker log records
+    to a stderr StreamHandler here makes messages emitted inside the fit (e.g.
+    "Perfect fit for ...") visible in the parent's output. The level comes from
+    the VBASE_LOG_LEVEL env var (default WARNING); the parent sets that env before
+    launching the pool, and fresh workers inherit it.
     """
     for var in (
         "OMP_NUM_THREADS",
@@ -43,6 +49,17 @@ def _init_blas_single_thread() -> None:
         "NUMEXPR_NUM_THREADS",
     ):
         os.environ[var] = "1"
+
+    level_name = os.environ.get("VBASE_LOG_LEVEL", "WARNING").upper()
+    level = getattr(logging, level_name, logging.WARNING)
+    # basicConfig is a no-op if the (fresh) worker root already has handlers, so
+    # this configures once and never duplicates handlers on reused workers.
+    logging.basicConfig(
+        level=level,
+        stream=sys.stderr,
+        format="%(levelname)s %(processName)s %(name)s: %(message)s",
+    )
+    logging.getLogger("vbase_utils").setLevel(level)
 
 
 def _fit_asset_chunk(
@@ -156,7 +173,7 @@ def compute_betas_fast(
     if parallel is None:
         results = Parallel(
             n_jobs=n_jobs,
-            initializer=_init_blas_single_thread,
+            initializer=_init_worker,
             inner_max_num_threads=1,
         )(tasks)
     else:

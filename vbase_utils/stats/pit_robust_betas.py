@@ -7,7 +7,7 @@ import pandas as pd
 from joblib import Parallel
 
 from vbase_utils.sim import sim
-from vbase_utils.stats._fast_betas import _init_blas_single_thread, compute_betas_fast
+from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
 from vbase_utils.stats.robust_betas import robust_betas
 
 # Configure logging
@@ -168,7 +168,7 @@ def pit_robust_betas(
             # pool acquisition per date.
             with Parallel(
                 n_jobs=n_jobs,
-                initializer=_init_blas_single_thread,
+                initializer=_init_worker,
                 inner_max_num_threads=1,
             ) as par:
                 pool["parallel"] = par
