@@ -2,8 +2,8 @@
 
 Thin wrapper over :func:`vbase_utils.stats._fast_betas.compute_betas_fast`, which
 fans the per-asset Huber-RLM fits out across processes in chunked asset blocks
-(one joblib task per block, numpy-only workers with BLAS pinned to a single
-thread). See that module for the rationale; the fit itself is the pure-numpy
+(one joblib task per block, numpy + numba workers with BLAS pinned to a single
+thread). See that module for the rationale; the fit itself is the numba/JIT
 hand-rolled Huber RLM (bit-faithful to statsmodels).
 """
 

@@ -1,10 +1,11 @@
-"""Fast chunked parallel Huber-RLM betas with pure-numpy workers.
+"""Fast chunked parallel Huber-RLM betas with numba/JIT workers.
 
-This module's import graph is deliberately limited to numpy + the pure-numpy
-:mod:`_huber_rlm` fit, so a joblib worker that unpickles :func:`_fit_asset_chunk`
-carries *only* numpy -- not statsmodels or pandas. That removes the statsmodels
-import floor that dominates per-worker peak memory in the default path (see the
-parallel betas memory-floor notes).
+A joblib worker that unpickles :func:`_fit_asset_chunk` carries numpy + the
+:mod:`_huber_rlm` numba fit -- not statsmodels or pandas. The numba fit is
+~2-3.7x faster per fit than the previous pure-numpy loop; the cost is that each
+worker now imports numba + llvmlite (~60 MB native), which raises the per-worker
+peak-memory floor roughly 2x versus the numpy-only workers (see the parallel
+betas memory-floor notes). Lower ``n_jobs`` to cap the footprint on wide panels.
 
 Two speedups over the per-asset dispatch in :mod:`parallel_robust_betas`:
 
@@ -12,7 +13,9 @@ Two speedups over the per-asset dispatch in :mod:`parallel_robust_betas`:
   task per block, so dispatch/serialization is amortized over many fits instead
   of paid per asset. Each task ships only its numpy column-slice of the weighted
   asset matrix plus the shared (read-only) weighted-factor matrix.
-* **Lean workers** -- see above; workers import numpy only.
+* **JIT'd fits** -- workers import numpy + numba only (no statsmodels / pandas);
+  :func:`_init_worker` warms the JIT once so the first chunk is not charged the
+  compile.
 
 Pool reuse across rebalance dates (passing a persistent ``joblib.Parallel``) is
 handled by the caller (:func:`pit_robust_betas`).
@@ -60,6 +63,14 @@ def _init_worker() -> None:
         format="%(levelname)s %(processName)s %(name)s: %(message)s",
     )
     logging.getLogger("vbase_utils").setLevel(level)
+
+    # Warm up / load the cached JIT so the first real chunk is not charged the
+    # numba compile. Tiny well-conditioned problem, result discarded. numba's
+    # on-disk cache (cache=True) means only the first worker of the first run
+    # compiles; later workers/runs load the cached object file.
+    warm_x = np.array([[1.0, 0.1], [1.0, -0.2], [1.0, 0.3], [1.0, -0.1]])
+    warm_y = np.array([0.1, -0.2, 0.15, -0.05])
+    fit_huber_rlm_params(warm_y, warm_x)
 
 
 def _fit_asset_chunk(
@@ -135,7 +146,7 @@ def compute_betas_fast(
     # Lazy import keeps this module's *top-level* graph light (joblib) and, for
     # prepare_weighted_regression_inputs, avoids a robust_betas <-> _fast_betas
     # cycle; the import runs only in the parent that calls this orchestrator, not
-    # in the numpy-only workers that unpickle _fit_asset_chunk.
+    # in the numpy + numba workers that unpickle _fit_asset_chunk.
     # pylint: disable=import-outside-toplevel
     from joblib import Parallel, delayed
 

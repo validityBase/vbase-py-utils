@@ -45,7 +45,7 @@ def pit_robust_betas(
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
         parallel: If True, fan the per-asset Huber-RLM fits out across processes in
-            chunked asset blocks (numpy-only workers, BLAS pinned to one thread per
+            chunked asset blocks (numpy + numba workers, BLAS pinned to one thread per
             worker); otherwise run them serially. Numerically identical either way.
             Defaults to False.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
@@ -106,7 +106,7 @@ def pit_robust_betas(
         df_fact_rets = data["df_fact_rets"]
 
         # Run robust regression. When parallel, fan the per-asset Huber-RLM fits
-        # out across chunked asset blocks (numpy-only workers, BLAS pinned to one
+        # out across chunked asset blocks (numpy + numba workers, BLAS pinned to one
         # thread per worker); otherwise run them serially. Identical betas either way.
         if parallel:
             beta_matrix = compute_betas_fast(

@@ -188,7 +188,7 @@ def robust_betas(
 ) -> pd.DataFrame:
     """Perform robust regression (Huber RLM) with exponential time-weighting.
 
-    Uses the pure-numpy hand-rolled Huber-t fit
+    Uses the numba/JIT hand-rolled Huber-t fit
     (:func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`), which reproduces
     ``statsmodels.RLM(..., M=HuberT()).fit()`` bit-for-bit (guarded by
     ``tests/stats/test_handrolled_vs_statsmodels.py``).
