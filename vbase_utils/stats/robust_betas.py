@@ -4,15 +4,9 @@ import logging
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 from numpy.typing import NDArray
 
 from vbase_utils.stats._huber_rlm import fit_huber_rlm_params
-
-# Supported robust-fit backends. "statsmodels" is the production default;
-# "handrolled" uses the pure-numpy bit-faithful reimplementation and is opt-in
-# for benchmarking (avoids per-fit statsmodels object overhead).
-_BACKENDS = ("statsmodels", "handrolled")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -181,9 +175,13 @@ def robust_betas(
     half_life: float | None = None,
     lambda_: float | None = None,
     min_timestamps: int = 10,
-    backend: str = "statsmodels",
 ) -> pd.DataFrame:
-    """Perform robust regression (RLM) with exponential time-weighting.
+    """Perform robust regression (Huber RLM) with exponential time-weighting.
+
+    Uses the pure-numpy hand-rolled Huber-t fit
+    (:func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`), which reproduces
+    ``statsmodels.RLM(..., M=HuberT()).fit()`` bit-for-bit (guarded by
+    ``tests/stats/test_handrolled_vs_statsmodels.py``).
 
     Args:
         df_asset_rets: DataFrame of dependent returns with shape (n_timestamps, n_assets).
@@ -199,9 +197,6 @@ def robust_betas(
             | 365            | 120                          |
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
-        backend: Robust-fit backend, "statsmodels" (default, production path) or
-            "handrolled" (pure-numpy bit-faithful reimplementation, opt-in for
-            benchmarking). Numerically identical either way.
 
     Returns:
         DataFrame of shape (n_factors, n_assets) containing the computed betas.
@@ -212,9 +207,6 @@ def robust_betas(
             Note: insufficient timestamps (< min_timestamps) returns an all-NaN
             beta matrix with a warning rather than raising.
     """
-    if backend not in _BACKENDS:
-        raise ValueError(f"Unknown backend {backend!r}; expected one of {_BACKENDS}.")
-
     # prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
     df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
         df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
@@ -236,41 +228,33 @@ def robust_betas(
             df_betas[asset] = np.nan
             continue
 
-        # X is filtered according to the mask used to filter y.
-        x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[valid_mask])
-        # Statsmodels does not apply weights to constant, apply manually.
-        x_w_const["const"] = x_w_const["const"] * sqrt_weights[valid_mask]
-        params = _fit_asset_params(asset, y_filtered, x_w_const, backend)
+        # Design = [const, factors]. The constant column is the weighted 1s
+        # (== sqrt_weights on the valid rows), matching the weighted regression.
+        x_design = np.column_stack(
+            (sqrt_weights[valid_mask], x_weighted.loc[valid_mask].to_numpy())
+        )
+        params = _fit_asset_betas(asset, y_filtered, x_design)
         if params is not None:
             df_betas[asset] = params
 
     return df_betas
 
 
-def _fit_asset_params(
+def _fit_asset_betas(
     asset: str,
     y_endog: np.ndarray,
-    x_w_const: pd.DataFrame,
-    backend: str,
-) -> pd.Series | None:
-    """Fit one asset's robust betas, returning params (indexed by design columns).
+    x_design: np.ndarray,
+) -> np.ndarray | None:
+    """Fit one asset's robust betas via the hand-rolled Huber RLM.
 
-    Returns None if the fit raises a linear-algebra/zero-division error, so the
-    caller leaves that asset's betas NaN. Both backends return a Series indexed by
-    ``x_w_const.columns`` (including the "const" row), so label-aligned assignment
-    into the factor-indexed beta frame drops the constant automatically.
+    ``x_design`` is ``[const, factors]``; the returned array is the factor betas
+    (constant dropped), positionally aligned with the factor columns. Returns
+    None if the fit raises a linear-algebra/zero-division error, so the caller
+    leaves that asset's betas NaN.
     """
-    if backend == "handrolled":
-        try:
-            params = fit_huber_rlm_params(y_endog, x_w_const.to_numpy())
-        except (np.linalg.LinAlgError, ZeroDivisionError) as e:
-            logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
-            return None
-        return pd.Series(params, index=x_w_const.columns)
-
-    rlm_model = sm.RLM(y_endog, x_w_const, M=sm.robust.norms.HuberT())
     try:
-        return rlm_model.fit().params
+        params = fit_huber_rlm_params(y_endog, x_design)
     except (np.linalg.LinAlgError, ZeroDivisionError) as e:
         logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
         return None
+    return params[1:]

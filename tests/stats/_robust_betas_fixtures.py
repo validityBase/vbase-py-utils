@@ -1,7 +1,6 @@
 """Shared test fixtures for robust_betas and parallel_robust_betas tests."""
 
 from typing import Callable
-from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -37,24 +36,22 @@ def make_multi_asset_ret_frames(
     return df_asset_rets, df_fact_rets
 
 
-def make_rlm_first_call_error_side_effect(real_rlm: Callable) -> Callable:
-    """Return a side-effect function whose first RLM call returns a mock
-    whose fit() raises LinAlgError.
+def make_fit_first_call_error_side_effect(real_fit: Callable) -> Callable:
+    """Return a side-effect whose first call raises LinAlgError.
 
-    Subsequent calls delegate to *real_rlm* so that only one asset gets NaN betas.
+    Subsequent calls delegate to *real_fit* so only one asset gets NaN betas.
+    Used to patch ``fit_huber_rlm_params`` in the serial and parallel paths.
     """
     call_count = [0]
 
-    def rlm_side_effect(*args, **kwargs):
+    def fit_side_effect(*args, **kwargs):
         if call_count[0] == 0:
             call_count[0] += 1
-            mock = MagicMock()
-            mock.fit.side_effect = np.linalg.LinAlgError("singular matrix")
-            return mock
+            raise np.linalg.LinAlgError("singular matrix")
         call_count[0] += 1
-        return real_rlm(*args, **kwargs)
+        return real_fit(*args, **kwargs)
 
-    return rlm_side_effect
+    return fit_side_effect
 
 
 def make_multi_factor_ret_frames(

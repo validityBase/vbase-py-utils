@@ -5,6 +5,5 @@ pandas>=2.2.3,<4
 pandas_market_calendars>=4.6.1,<6
 pytz>=2025.2
 scipy>=1.8,<1.16
-statsmodels>=0.14.4,<0.15
 tqdm>=4.66.3,<5
 yfinance>=0.2.55,<0.3

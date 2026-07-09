@@ -49,6 +49,9 @@ def _mad_scale(resid: NDArray[np.floating]) -> float:
     return float(np.median(np.abs(resid)) / _MAD_C)
 
 
+# The IRLS loop needs a handful of intermediate arrays (residuals, scale,
+# weights, deviance); splitting it would obscure the algorithm.
+# pylint: disable=too-many-locals
 def fit_huber_rlm_params(
     endog: NDArray[np.floating],
     exog: NDArray[np.floating],
