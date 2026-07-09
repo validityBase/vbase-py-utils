@@ -21,18 +21,18 @@ def check_min_timestamps_series(
     arr: NDArray[np.floating], min_timestamps: int
 ) -> tuple[NDArray[np.floating], NDArray[np.bool_]]:
     """
-    Filter a numpy array based on minimum number of defined (non-NaN) values.
+    Filter a numpy array based on minimum number of defined (finite) values.
 
     Args:
         arr: Numpy array to filter
         min_timestamps: Minimum number of defined values required
 
     Returns:
-        tuple: Filtered array and boolean mask identifying non-NaN entries. If the
+        tuple: Filtered array and boolean mask identifying finite entries. If the
                minimum defined values condition is not met, both elements are empty arrays.
     """
-    # Check for NaN values.
-    mask = ~np.isnan(arr)
+    # Keep only finite values (drops NaN and +/-inf).
+    mask = np.isfinite(arr)
     # Count the number of defined values.
     defined_count = np.count_nonzero(mask)
 
@@ -130,6 +130,16 @@ def _validate_beta_inputs(
         )
         # Not enough timestamps to perform regression.
         # Return the timestamp count and all-NaN beta matrix.
+        return n_timestamps, df_betas, False
+
+    # Non-finite factors (NaN/inf) are shared across all assets, so a single bad
+    # value invalidates the whole date. Skip it (all-NaN betas) rather than
+    # raising, so a simulation continues past isolated dirty factor dates.
+    if not np.isfinite(df_fact_rets.to_numpy()).all():
+        logger.warning(
+            "Non-finite (NaN/inf) factor value(s) at %s; skipping date (all-NaN betas).",
+            df_fact_rets.index[-1],
+        )
         return n_timestamps, df_betas, False
 
     # Check for near-zero variance in df_fact_rets.
@@ -253,7 +263,7 @@ def _fit_asset_betas(
     leaves that asset's betas NaN.
     """
     try:
-        params = fit_huber_rlm_params(y_endog, x_design)
+        params = fit_huber_rlm_params(y_endog, x_design, label=asset)
     except (np.linalg.LinAlgError, ZeroDivisionError) as e:
         logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
         return None

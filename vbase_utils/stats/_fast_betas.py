@@ -69,7 +69,7 @@ def _fit_asset_chunk(
     out: List[Tuple[str, Optional[NDArray[np.floating]]]] = []
     for j, col in enumerate(cols):
         yv = y_weighted_chunk[:, j]
-        mask = ~np.isnan(yv)
+        mask = np.isfinite(yv)  # drops NaN and +/-inf
         if np.count_nonzero(mask) < min_timestamps:
             out.append((col, None))
             continue
@@ -79,7 +79,7 @@ def _fit_asset_chunk(
         # the constant column equals sqrt_weights on the valid rows.
         x_c = np.column_stack((sqrt_weights[mask], xw[mask]))
         try:
-            params = fit_huber_rlm_params(y_f, x_c)
+            params = fit_huber_rlm_params(y_f, x_c, label=col)
         except (np.linalg.LinAlgError, ZeroDivisionError):
             out.append((col, None))
             continue

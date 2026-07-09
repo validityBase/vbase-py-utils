@@ -20,8 +20,13 @@ The IRLS loop mirrors statsmodels exactly, verified against the 0.14.4 source:
   ``<= tol`` or ``maxiter`` is reached.
 """
 
+import logging
+
 import numpy as np
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 # HuberT default tuning constant (statsmodels norms.HuberT().t).
 _HUBER_T = 1.345
@@ -51,7 +56,7 @@ def _mad_scale(resid: NDArray[np.floating]) -> float:
 
 # The IRLS loop needs a handful of intermediate arrays (residuals, scale,
 # weights, deviance); splitting it would obscure the algorithm.
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals, too-many-arguments
 def fit_huber_rlm_params(
     endog: NDArray[np.floating],
     exog: NDArray[np.floating],
@@ -59,6 +64,7 @@ def fit_huber_rlm_params(
     t: float = _HUBER_T,
     tol: float = 1e-8,
     maxiter: int = 50,
+    label: str | None = None,
 ) -> NDArray[np.floating]:
     """Fit a Huber-t robust linear model, returning the coefficient vector.
 
@@ -73,6 +79,8 @@ def fit_huber_rlm_params(
         t: Huber tuning constant. Defaults to 1.345.
         tol: Convergence tolerance on the deviance. Defaults to 1e-8.
         maxiter: Maximum IRLS iterations. Defaults to 50.
+        label: Optional identifier (e.g. asset name) used only in the perfect-fit
+            log message.
 
     Returns:
         Estimated parameters, shape (p,).
@@ -87,6 +95,12 @@ def fit_huber_rlm_params(
         # matching statsmodels _MinimalWLS.results().scale, not the MAD scale.
         wresid = np.sqrt(w) * resid
         wls_scale = float(wresid @ wresid) / df_resid
+        # A zero (perfect fit) or non-finite scale would make resid/wls_scale a
+        # 0/0 or nan; rho(0)=0, so the deviance is 0. Guarding here also avoids a
+        # spurious "invalid value in divide" warning. The scale==0 break below
+        # governs termination, so this does not change the fitted params.
+        if not wls_scale > 0.0:
+            return 0.0
         return float(_huber_rho(resid / wls_scale, t).sum())
 
     # Initial fit: WLS with unit weights == OLS via pseudo-inverse (SVD).
@@ -102,6 +116,9 @@ def fit_huber_rlm_params(
         if scale == 0.0:
             # Perfect fit of the weighted data: statsmodels warns and stops,
             # keeping the last params.
+            logger.warning(
+                "Perfect fit for %s", label if label is not None else "asset"
+            )
             break
         w = _huber_weights(resid / scale, t)
         sw = np.sqrt(w)
