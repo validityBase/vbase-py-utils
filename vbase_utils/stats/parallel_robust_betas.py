@@ -15,7 +15,9 @@ import pandas as pd
 import statsmodels.api as sm
 from joblib import Parallel, delayed
 
+from vbase_utils.stats._huber_rlm import fit_huber_rlm_params
 from vbase_utils.stats.robust_betas import (
+    _BACKENDS,
     check_min_timestamps_series,
     prepare_weighted_regression_inputs,
 )
@@ -50,6 +52,7 @@ def _compute_single_asset_beta(
     x_weighted: pd.DataFrame,
     sqrt_weights: np.ndarray,
     min_timestamps: int,
+    backend: str = "statsmodels",
 ):
     """Compute beta for a single asset - extracted for parallelization.
 
@@ -59,6 +62,7 @@ def _compute_single_asset_beta(
         x_weighted: Weighted factor returns DataFrame
         sqrt_weights: Square root of exponential weights
         min_timestamps: Minimum timestamps required for regression
+        backend: "statsmodels" (default) or "handrolled" robust-fit backend.
 
     Returns:
         Tuple of (asset, params) where params is None if insufficient data
@@ -78,6 +82,18 @@ def _compute_single_asset_beta(
     x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[y_valid_mask])
     # Statsmodels does not apply weights to constant, apply manually.
     x_w_const["const"] = x_w_const["const"] * sqrt_weights[y_valid_mask]
+
+    # The statsmodels branch stays in this module's namespace so the existing
+    # patch("...parallel_robust_betas.sm.RLM") test seam keeps working; the
+    # handrolled branch shares the pure-numpy fit with the serial path.
+    if backend == "handrolled":
+        try:
+            params = fit_huber_rlm_params(y_weighted, x_w_const.to_numpy())
+        except (np.linalg.LinAlgError, ZeroDivisionError) as e:
+            logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
+            return asset, None
+        return asset, pd.Series(params, index=x_w_const.columns)
+
     rlm_model = sm.RLM(y_weighted, x_w_const, M=sm.robust.norms.HuberT())
     try:
         rlm_results = rlm_model.fit()
@@ -98,6 +114,7 @@ def parallel_robust_betas(
     lambda_: float | None = None,
     min_timestamps: int = 10,
     n_jobs: int = -1,
+    backend: str = "statsmodels",
 ) -> pd.DataFrame:
     """Perform robust regression (RLM) with exponential time-weighting.
 
@@ -116,6 +133,8 @@ def parallel_robust_betas(
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
         n_jobs: Number of parallel jobs to run. -1 uses all available cores. Defaults to -1.
+        backend: Robust-fit backend, "statsmodels" (default) or "handrolled"
+            (pure-numpy bit-faithful reimplementation, opt-in for benchmarking).
 
     Returns:
         DataFrame of shape (n_factors, n_assets) containing the computed betas.
@@ -126,6 +145,9 @@ def parallel_robust_betas(
             Note: insufficient timestamps (< min_timestamps) returns an all-NaN
             beta matrix with a warning rather than raising.
     """
+    if backend not in _BACKENDS:
+        raise ValueError(f"Unknown backend {backend!r}; expected one of {_BACKENDS}.")
+
     # prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
     df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
         df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
@@ -141,7 +163,7 @@ def parallel_robust_betas(
         n_jobs=n_jobs, initializer=_init_blas_single_thread, inner_max_num_threads=1
     )(
         delayed(_compute_single_asset_beta)(
-            asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps
+            asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps, backend
         )
         for asset in df_asset_rets.columns
     )

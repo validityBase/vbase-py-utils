@@ -28,6 +28,7 @@ def pit_robust_betas(
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
     n_jobs: int = -1,
+    backend: str = "statsmodels",
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -57,6 +58,9 @@ def pit_robust_betas(
             worker count (each process re-imports pandas/numpy/statsmodels), so on wide
             panels lower ``n_jobs`` (e.g. 6-8) to cap the memory footprint at some
             throughput cost.
+        backend: Robust-fit backend forwarded to robust_betas/parallel_robust_betas,
+            "statsmodels" (default) or "handrolled" (pure-numpy bit-faithful
+            reimplementation, opt-in for benchmarking).
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -112,6 +116,7 @@ def pit_robust_betas(
                 lambda_=lambda_,
                 min_timestamps=min_timestamps,
                 n_jobs=n_jobs,
+                backend=backend,
             )
         else:
             beta_matrix = robust_betas(
@@ -120,6 +125,7 @@ def pit_robust_betas(
                 half_life=half_life,
                 lambda_=lambda_,
                 min_timestamps=min_timestamps,
+                backend=backend,
             )
         # Fill NA betas with 1.0. Only fills rows where at least one beta is not NA
         if fill_missing_betas:
