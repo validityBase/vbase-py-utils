@@ -4,8 +4,9 @@ import logging
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 from numpy.typing import NDArray
+
+from vbase_utils.stats._huber_rlm import fit_huber_rlm_params
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,18 +21,18 @@ def check_min_timestamps_series(
     arr: NDArray[np.floating], min_timestamps: int
 ) -> tuple[NDArray[np.floating], NDArray[np.bool_]]:
     """
-    Filter a numpy array based on minimum number of defined (non-NaN) values.
+    Filter a numpy array based on minimum number of defined (finite) values.
 
     Args:
         arr: Numpy array to filter
         min_timestamps: Minimum number of defined values required
 
     Returns:
-        tuple: Filtered array and boolean mask identifying non-NaN entries. If the
+        tuple: Filtered array and boolean mask identifying finite entries. If the
                minimum defined values condition is not met, both elements are empty arrays.
     """
-    # Check for NaN values.
-    mask = ~np.isnan(arr)
+    # Keep only finite values (drops NaN and +/-inf).
+    mask = np.isfinite(arr)
     # Count the number of defined values.
     defined_count = np.count_nonzero(mask)
 
@@ -131,6 +132,16 @@ def _validate_beta_inputs(
         # Return the timestamp count and all-NaN beta matrix.
         return n_timestamps, df_betas, False
 
+    # Non-finite factors (NaN/inf) are shared across all assets, so a single bad
+    # value invalidates the whole date. Skip it (all-NaN betas) rather than
+    # raising, so a simulation continues past isolated dirty factor dates.
+    if not np.isfinite(df_fact_rets.to_numpy()).all():
+        logger.warning(
+            "Non-finite (NaN/inf) factor value(s) at %s; skipping date (all-NaN betas).",
+            df_fact_rets.index[-1],
+        )
+        return n_timestamps, df_betas, False
+
     # Check for near-zero variance in df_fact_rets.
     if df_fact_rets.var().min() < NEAR_ZERO_VARIANCE_THRESHOLD:
         logger.error("One or more factors in df_fact_rets have near-zero variance.")
@@ -175,7 +186,12 @@ def robust_betas(
     lambda_: float | None = None,
     min_timestamps: int = 10,
 ) -> pd.DataFrame:
-    """Perform robust regression (RLM) with exponential time-weighting.
+    """Perform robust regression (Huber RLM) with exponential time-weighting.
+
+    Uses the numba/JIT hand-rolled Huber-t fit
+    (:func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`), which reproduces
+    ``statsmodels.RLM(..., M=HuberT()).fit()`` bit-for-bit (guarded by
+    ``tests/stats/test_handrolled_vs_statsmodels.py``).
 
     Args:
         df_asset_rets: DataFrame of dependent returns with shape (n_timestamps, n_assets).
@@ -222,17 +238,33 @@ def robust_betas(
             df_betas[asset] = np.nan
             continue
 
-        # X is filtered according to the mask used to filter y.
-        x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[valid_mask])
-        # Statsmodels does not apply weights to constant, apply manually.
-        x_w_const["const"] = x_w_const["const"] * sqrt_weights[valid_mask]
-        rlm_model = sm.RLM(y_filtered, x_w_const, M=sm.robust.norms.HuberT())
-        try:
-            rlm_results = rlm_model.fit()
-        except (np.linalg.LinAlgError, ZeroDivisionError) as e:
-            logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
-            continue
-
-        df_betas[asset] = rlm_results.params
+        # Design = [const, factors]. The constant column is the weighted 1s
+        # (== sqrt_weights on the valid rows), matching the weighted regression.
+        x_design = np.column_stack(
+            (sqrt_weights[valid_mask], x_weighted.loc[valid_mask].to_numpy())
+        )
+        params = _fit_asset_betas(asset, y_filtered, x_design)
+        if params is not None:
+            df_betas[asset] = params
 
     return df_betas
+
+
+def _fit_asset_betas(
+    asset: str,
+    y_endog: np.ndarray,
+    x_design: np.ndarray,
+) -> np.ndarray | None:
+    """Fit one asset's robust betas via the hand-rolled Huber RLM.
+
+    ``x_design`` is ``[const, factors]``; the returned array is the factor betas
+    (constant dropped), positionally aligned with the factor columns. Returns
+    None if the fit raises a linear-algebra/zero-division error, so the caller
+    leaves that asset's betas NaN.
+    """
+    try:
+        params = fit_huber_rlm_params(y_endog, x_design, label=asset)
+    except (np.linalg.LinAlgError, ZeroDivisionError) as e:
+        logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
+        return None
+    return params[1:]

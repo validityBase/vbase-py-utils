@@ -4,9 +4,10 @@ import logging
 from typing import Dict, Optional
 
 import pandas as pd
+from joblib import Parallel
 
 from vbase_utils.sim import sim
-from vbase_utils.stats.parallel_robust_betas import parallel_robust_betas
+from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
 from vbase_utils.stats.robust_betas import robust_betas
 
 # Configure logging
@@ -16,7 +17,7 @@ logger.addHandler(logging.NullHandler())
 
 # The function must take a large number of arguments
 # and consequently has a large number of local variables.
-# pylint: disable=too-many-arguments, too-many-locals, too-many-branches
+# pylint: disable=too-many-arguments, too-many-locals, too-many-branches, too-many-statements
 def pit_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
@@ -43,9 +44,9 @@ def pit_robust_betas(
         half_life: Half-life in time units (e.g., days). Must be positive.
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
-        parallel: If True, fan the per-asset RLM fits out across processes via
-            parallel_robust_betas() (BLAS pinned to one thread per worker);
-            otherwise run them serially. Numerically identical either way.
+        parallel: If True, fan the per-asset Huber-RLM fits out across processes in
+            chunked asset blocks (numpy + numba workers, BLAS pinned to one thread per
+            worker); otherwise run them serially. Numerically identical either way.
             Defaults to False.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
             least one asset has a valid beta. Defaults to False.
@@ -54,9 +55,8 @@ def pit_robust_betas(
         progress: Whether to show a progress bar during simulation. Defaults to False.
         n_jobs: Number of jobs to run in parallel when ``parallel=True``. Defaults to
             -1 (use all available cores). Peak memory scales roughly linearly with the
-            worker count (each process re-imports pandas/numpy/statsmodels), so on wide
-            panels lower ``n_jobs`` (e.g. 6-8) to cap the memory footprint at some
-            throughput cost.
+            worker count, so on wide panels lower ``n_jobs`` (e.g. 6-8) to cap the
+            memory footprint at some throughput cost.
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -93,6 +93,10 @@ def pit_robust_betas(
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
 
+    # When parallel, a single joblib.Parallel pool is reused across all rebalance
+    # dates (kept warm below); the callback reads it from this holder.
+    pool: Dict[str, Optional[Parallel]] = {"parallel": None}
+
     # Define callback function for sim.
     def regression_callback(
         data: Dict[str, pd.DataFrame | pd.Series],
@@ -101,17 +105,18 @@ def pit_robust_betas(
         df_asset_rets = data["df_asset_rets"]
         df_fact_rets = data["df_fact_rets"]
 
-        # Run robust regression. When parallel, fan the per-asset RLM fits out
-        # across processes (BLAS pinned to one thread per worker); otherwise run
-        # them serially. Both produce identical betas.
+        # Run robust regression. When parallel, fan the per-asset Huber-RLM fits
+        # out across chunked asset blocks (numpy + numba workers, BLAS pinned to one
+        # thread per worker); otherwise run them serially. Identical betas either way.
         if parallel:
-            beta_matrix = parallel_robust_betas(
+            beta_matrix = compute_betas_fast(
                 df_asset_rets,
                 df_fact_rets,
                 half_life=half_life,
                 lambda_=lambda_,
                 min_timestamps=min_timestamps,
                 n_jobs=n_jobs,
+                parallel=pool["parallel"],
             )
         else:
             beta_matrix = robust_betas(
@@ -152,12 +157,25 @@ def pit_robust_betas(
     # without dispatch starvation -- benchmarks show no benefit from instead
     # parallelizing over dates, so the simpler asset-level path is used.
     if len(df_asset_rets.index) >= min_timestamps:
-        sim_results = sim(
+        sim_args = (
             {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
             regression_callback,
             rebalance_time_index,
-            progress=progress,
         )
+        if parallel:
+            # One worker pool for the whole date loop: keeps workers (and their
+            # numpy import) warm across every rebalance date instead of paying
+            # pool acquisition per date.
+            with Parallel(
+                n_jobs=n_jobs,
+                initializer=_init_worker,
+                inner_max_num_threads=1,
+            ) as par:
+                pool["parallel"] = par
+                sim_results = sim(*sim_args, progress=progress)
+            pool["parallel"] = None
+        else:
+            sim_results = sim(*sim_args, progress=progress)
         # Fill in the betas DataFrame with the actual values from the simulation.
         if "betas" in sim_results:
             results["betas"].update(sim_results["betas"])
