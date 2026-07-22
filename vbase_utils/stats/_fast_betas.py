@@ -163,7 +163,10 @@ def compute_betas_fast(
     assets = list(df_asset_rets.columns)
     n_assets = len(assets)
     # Per-asset weighted dependent = values * sqrt_weights (as in the serial path).
-    y_weighted = df_asset_rets.to_numpy(dtype=np.float64) * sqrt_weights[:, None]
+    # copy=True guarantees an owned buffer (to_numpy may return a view into the
+    # frame), so the in-place multiply is safe and allocates exactly one panel.
+    y_weighted = df_asset_rets.to_numpy(dtype=np.float64, copy=True)
+    y_weighted *= sqrt_weights[:, None]
 
     eff_jobs = (os.cpu_count() or 1) if n_jobs in (-1, None) else max(1, n_jobs)
     if n_chunks is None:

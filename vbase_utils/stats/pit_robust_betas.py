@@ -150,6 +150,26 @@ def pit_robust_betas(
         )
     }
 
+    def write_betas(
+        timestamp: pd.Timestamp,
+        result_dict: Dict[str, pd.DataFrame | pd.Series],
+    ) -> None:
+        """sim() streaming sink: write one date's betas into the preallocated frame.
+
+        Assigns straight into the (timestamp, factor) rows of results["betas"] so
+        sim() retains nothing and peak memory stays flat regardless of the number
+        of rebalance dates. beta_matrix is indexed by factor and columned by asset;
+        only the factors/assets present at this date are written, leaving the rest
+        NaN -- identical to the previous DataFrame.update() fill.
+        """
+        beta_matrix = result_dict["betas"]
+        if beta_matrix.empty:
+            return
+        row_index = pd.MultiIndex.from_product(
+            [[timestamp], beta_matrix.index], names=["timestamp", "factor"]
+        )
+        results["betas"].loc[row_index, beta_matrix.columns] = beta_matrix.values
+
     # Run simulation only if there is sufficient data to produce any betas.
     # The rebalance-date loop runs in sim(); when parallel=True the per-date
     # callback fans the per-asset fits out across processes via
@@ -172,25 +192,30 @@ def pit_robust_betas(
                 inner_max_num_threads=1,
             ) as par:
                 pool["parallel"] = par
-                sim_results = sim(*sim_args, progress=progress)
+                # write_betas streams each date straight into results["betas"];
+                # sim() retains nothing, so peak memory does not grow with the
+                # number of rebalance dates.
+                sim(*sim_args, progress=progress, on_result=write_betas)
             pool["parallel"] = None
         else:
-            sim_results = sim(*sim_args, progress=progress)
-        # Fill in the betas DataFrame with the actual values from the simulation.
-        if "betas" in sim_results:
-            results["betas"].update(sim_results["betas"])
+            sim(*sim_args, progress=progress, on_result=write_betas)
 
     # Calculate residuals using matrix operations.
 
-    # Get the betas DataFrame.
+    # Get the betas DataFrame and drop the dict reference: after the reindex
+    # below the dict would otherwise pin a second full copy of the panel at peak.
     df_betas = results["betas"]
+    results.clear()
 
     # Reindex betas to the new MultiIndex and fill in missing values
     # Create a MultiIndex for the asset returns index
     new_index = pd.MultiIndex.from_product(
         [df_asset_rets.index, factor_names], names=["timestamp", "factor"]
     )
-    df_betas = df_betas.reindex(new_index)
+    # On a full build the rebalance index already spans every return timestamp,
+    # making the reindex an identical full copy; skip it in that case.
+    if not df_betas.index.equals(new_index):
+        df_betas = df_betas.reindex(new_index)
 
     # Forward fill betas along the timestamp index to match return timestamps.
     df_betas.ffill(inplace=True, axis=0)
@@ -209,6 +234,9 @@ def pit_robust_betas(
     df_hedge_rets_by_fact = df_hedge_weights.multiply(
         df_fact_rets_stacked["ret"], axis=0
     )
+    # The hedge-weights panel is no longer needed; free it before the groupby
+    # below allocates its temporaries.
+    del df_hedge_weights
     # Sum across factors for each timestamp-asset combination, then unstack.
     df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(min_count=1)
 
