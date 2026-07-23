@@ -116,7 +116,7 @@ def _fit_asset_chunk(
 
 
 # The function mirrors parallel_robust_betas' signature plus pool/chunk controls.
-# pylint: disable=too-many-arguments, too-many-locals
+# pylint: disable=too-many-arguments, too-many-positional-arguments, too-many-locals
 def compute_betas_fast(
     df_asset_rets,
     df_fact_rets,

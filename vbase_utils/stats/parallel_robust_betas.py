@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-# pylint: disable=too-many-arguments
+# pylint: disable=too-many-arguments, too-many-positional-arguments
 def parallel_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
