@@ -148,7 +148,7 @@ def compute_betas_fast(
     # cycle; the import runs only in the parent that calls this orchestrator, not
     # in the numpy + numba workers that unpickle _fit_asset_chunk.
     # pylint: disable=import-outside-toplevel
-    from joblib import Parallel, delayed
+    from joblib import Parallel, delayed, effective_n_jobs
 
     from vbase_utils.stats.robust_betas import prepare_weighted_regression_inputs
 
@@ -168,7 +168,11 @@ def compute_betas_fast(
     y_weighted = df_asset_rets.to_numpy(dtype=np.float64, copy=True)
     y_weighted *= sqrt_weights[:, None]
 
-    eff_jobs = (os.cpu_count() or 1) if n_jobs in (-1, None) else max(1, n_jobs)
+    # effective_n_jobs mirrors joblib's own semantics (-1 = all cores, -2 = all
+    # but one, None = 1), so chunk sizing tracks the worker count that will
+    # actually run. When a persistent pool is supplied its n_jobs wins, since
+    # that pool -- not this call's argument -- executes the tasks.
+    eff_jobs = effective_n_jobs(getattr(parallel, "n_jobs", n_jobs))
     if n_chunks is None:
         n_chunks = min(n_assets, max(1, 4 * eff_jobs))
     idx_chunks = [ix for ix in np.array_split(np.arange(n_assets), n_chunks) if len(ix)]

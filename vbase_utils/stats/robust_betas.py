@@ -132,12 +132,21 @@ def _validate_beta_inputs(
         # Return the timestamp count and all-NaN beta matrix.
         return n_timestamps, df_betas, False
 
-    # Non-finite factors (NaN/inf) are shared across all assets, so a single bad
-    # value invalidates the whole date. Skip it (all-NaN betas) rather than
-    # raising, so a simulation continues past isolated dirty factor dates.
-    if not np.isfinite(df_fact_rets.to_numpy()).all():
+    # Non-finite factors (NaN/inf) are shared across all assets, and neither fit
+    # path masks them out of the design matrix, so a single bad row invalidates
+    # every fit over the window containing it. Return no betas for this date
+    # rather than raising, so a simulation continues past dirty factor dates.
+    # Callers that forward-fill (e.g. pit_robust_betas) carry the prior date's
+    # betas over the gap; the date is not left NaN downstream.
+    finite_rows = np.isfinite(df_fact_rets.to_numpy()).all(axis=1)
+    if not finite_rows.all():
+        bad_index = df_fact_rets.index[~finite_rows]
         logger.warning(
-            "Non-finite (NaN/inf) factor value(s) at %s; skipping date (all-NaN betas).",
+            "Non-finite (NaN/inf) factor value(s) at %d timestamp(s) "
+            "(first %s, last %s); no new betas for %s, prior betas carry forward.",
+            len(bad_index),
+            bad_index[0],
+            bad_index[-1],
             df_fact_rets.index[-1],
         )
         return n_timestamps, df_betas, False

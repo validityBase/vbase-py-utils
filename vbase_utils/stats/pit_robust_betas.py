@@ -218,7 +218,11 @@ def pit_robust_betas(
         df_betas = df_betas.reindex(new_index)
 
     # Forward fill betas along the timestamp index to match return timestamps.
-    df_betas.ffill(inplace=True, axis=0)
+    # The fill must run per factor: the index is (timestamp, factor), so a plain
+    # ffill(axis=0) walks the flattened rows and fills the first factor of a
+    # carry-forward date from the LAST factor of the previous date, silently
+    # swapping betas across factors on every non-rebalance date.
+    df_betas = df_betas.groupby(level="factor", sort=False).ffill()
 
     # Shift betas by 1 period so returns at t are hedged using betas from t-1.
     df_hedge_weights = -1 * df_betas.shift(1)

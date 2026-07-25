@@ -153,6 +153,64 @@ class TestPitRobustBetas(unittest.TestCase):
             0.9,
         )
 
+    def test_carry_forward_preserves_factor_identity(self):
+        """Carried-forward betas stay on their own factor.
+
+        df_betas is indexed by (timestamp, factor), so a plain ffill(axis=0)
+        walks the flattened rows and fills the first factor of a carry-forward
+        date from the LAST factor of the previous rebalance date -- silently
+        swapping betas across factors. The fill must be per factor.
+        """
+        # Two factors with clearly separated betas, so a cross-factor fill is
+        # unambiguous rather than a near-miss on noisy estimates.
+        iwm_returns = pd.Series(
+            np.random.normal(0, STD_FACT_RETS, self.n_timestamps),
+            index=self.dates,
+            name="IWM",
+        )
+        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns, "IWM": iwm_returns})
+        asset_rets = (
+            2.0 * self.spy_returns
+            + 0.2 * iwm_returns
+            + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+        )
+        df_asset_rets = pd.DataFrame({"Asset1": asset_rets}, index=self.dates)
+
+        # Sparse rebalance: most dates carry forward, exercising the fill.
+        rebalance_dates = pd.DatetimeIndex([self.dates[49], self.dates[74]])
+        df_betas = pit_robust_betas(
+            df_asset_rets,
+            df_fact_rets,
+            half_life=30,
+            rebalance_time_index=rebalance_dates,
+        )["df_betas"]
+
+        # Every date between two rebalances must repeat that rebalance's betas
+        # factor for factor.
+        for rebalance_date, next_date in (
+            (self.dates[49], self.dates[74]),
+            (self.dates[74], self.dates[-1] + pd.Timedelta(days=1)),
+        ):
+            expected = df_betas.xs(rebalance_date, level="timestamp")
+            carried = self.dates[
+                (self.dates > rebalance_date) & (self.dates < next_date)
+            ]
+            self.assertGreater(len(carried), 0)
+            for timestamp in carried:
+                pd.testing.assert_frame_equal(
+                    df_betas.xs(timestamp, level="timestamp"), expected
+                )
+
+        # Guard the estimates themselves: a factor swap would also show up as
+        # SPY and IWM trading values.
+        betas_at_rebalance = df_betas.xs(self.dates[49], level="timestamp")
+        self.assertAlmostEqual(
+            betas_at_rebalance.loc["SPY", "Asset1"], 2.0, delta=DEFAULT_DELTA
+        )
+        self.assertAlmostEqual(
+            betas_at_rebalance.loc["IWM", "Asset1"], 0.2, delta=DEFAULT_DELTA
+        )
+
     def test_empty_data(self):
         """Test handling of empty input DataFrames."""
         empty_df = pd.DataFrame()
