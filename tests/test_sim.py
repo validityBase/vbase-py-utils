@@ -57,7 +57,7 @@ class TestSim(unittest.TestCase):
         self.assertEqual(result["values"].iloc[-1]["all"], 555)  # 5 + 50 + 500
 
     def test_invalid_index(self):
-        """Test that non-DatetimeIndex raises ValueError."""
+        """Test that a plain integer Index (neither DatetimeIndex nor MultiIndex) raises ValueError."""
         df = pd.DataFrame({"A": [1, 2, 3]}, index=[1, 2, 3])
         time_index = pd.date_range("2023-01-01", periods=3)
 
@@ -233,6 +233,184 @@ class TestSim(unittest.TestCase):
         self.assertEqual(len(result["result"]), len(self.time_index))
         self.assertTrue(result["result"]["value"].iloc[:2].isna().all())
         self.assertTrue(result["result"]["value"].iloc[2:].notna().all())
+
+
+class TestSimMultiIndex(unittest.TestCase):
+    """Test cases for sim() with MultiIndex (cross-sectional panel) inputs.
+
+    The canonical use-case is a (date, symbol) panel where masking on the first
+    (date) level gives the callback a causal view of the universe at each step.
+    """
+
+    def setUp(self):
+        """Set up a balanced (date, symbol) MultiIndex panel."""
+        self.dates = pd.date_range("2023-01-01", periods=4, freq="W")
+        self.symbols = ["AAPL", "MSFT", "GOOG"]
+        mi = pd.MultiIndex.from_product(
+            [self.dates, self.symbols], names=["date", "symbol"]
+        )
+        n = len(mi)
+        self.panel = pd.DataFrame(
+            {
+                "feature": np.arange(n, dtype=float),
+                "factor": np.ones(n),
+            },
+            index=mi,
+        )
+
+    def test_multiindex_masking_row_count(self):
+        """Callback sees only rows whose first-level date is <= the current timestamp."""
+        n_rows: list[int] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            n_rows.append(len(data["panel"]))
+            return {}
+
+        sim({"panel": self.panel}, callback, self.dates)
+
+        n_sym = len(self.symbols)
+        # Each successive timestamp exposes one more week (n_sym rows).
+        self.assertEqual(n_rows, [n_sym * (i + 1) for i in range(len(self.dates))])
+
+    def test_multiindex_masking_excludes_future(self):
+        """No row with a future date is visible in the masked panel."""
+        max_dates_seen: list[pd.Timestamp] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            max_dates_seen.append(data["panel"].index.get_level_values("date").max())
+            return {}
+
+        sim({"panel": self.panel}, callback, self.dates)
+
+        for i, seen_max in enumerate(max_dates_seen):
+            self.assertLessEqual(
+                seen_max,
+                self.dates[i],
+                msg=f"At step {i} (timestamp {self.dates[i].date()}), "
+                f"future date {seen_max.date()} appeared in the panel.",
+            )
+
+    def test_multiindex_callback_sees_growing_window(self):
+        """The number of distinct dates in the panel grows by one at each step."""
+        n_dates_visible: list[int] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            n_dates_visible.append(
+                data["panel"].index.get_level_values("date").nunique()
+            )
+            return {}
+
+        sim({"panel": self.panel}, callback, self.dates)
+
+        self.assertEqual(n_dates_visible, list(range(1, len(self.dates) + 1)))
+
+    def test_multiindex_result_accumulation_wide(self):
+        """
+        A symbol-indexed Series returned by the callback is accumulated as a row
+        in a wide (date × symbol) DataFrame — one row per timestamp.
+        """
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.Series]:
+            panel = data["panel"]
+            t = panel.index.get_level_values("date").max()
+            xs = panel[panel.index.get_level_values("date") == t]["feature"]
+            xs = xs.copy()
+            xs.index = xs.index.get_level_values("symbol")
+            return {"xs": xs}
+
+        result = sim({"panel": self.panel}, callback, self.dates)
+
+        self.assertIn("xs", result)
+        wide = result["xs"]
+        # Row index = timestamps processed; column index = symbols.
+        self.assertEqual(list(wide.index), list(self.dates))
+        self.assertEqual(sorted(wide.columns.tolist()), sorted(self.symbols))
+
+    def test_multiindex_invalid_first_level_type(self):
+        """MultiIndex whose first level is not a DatetimeIndex raises ValueError."""
+        mi = pd.MultiIndex.from_tuples(
+            [(1, "AAPL"), (1, "MSFT"), (2, "AAPL"), (2, "MSFT")],
+            names=["int_date", "symbol"],
+        )
+        df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]}, index=mi)
+        time_index = pd.date_range("2023-01-01", periods=2)
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            return {}
+
+        with self.assertRaisesRegex(ValueError, "first level must be a DatetimeIndex"):
+            sim({"panel": df}, callback, time_index)
+
+    def test_multiindex_dropna_removes_all_nan_column(self):
+        """
+        dropna(axis=1, how='all') applies to MultiIndex DataFrames: a column
+        that is entirely NaN in the masked window is dropped from the data
+        passed to the callback.
+        """
+        n_sym = len(self.symbols)
+        n_dates = len(self.dates)
+        # sparse_col is NaN for the first two date slices, present from date 3 onward.
+        sparse_values = [np.nan] * (n_sym * 2) + [1.0] * (n_sym * (n_dates - 2))
+        df = pd.DataFrame(
+            {
+                "always_present": np.arange(len(self.panel), dtype=float),
+                "sparse_col": sparse_values,
+            },
+            index=self.panel.index,
+        )
+        cols_seen: list[list[str]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            cols_seen.append(sorted(data["panel"].columns.tolist()))
+            return {}
+
+        sim({"panel": df}, callback, self.dates)
+
+        # Dates 0–1: sparse_col is entirely NaN in the masked window → dropped.
+        self.assertEqual(cols_seen[0], ["always_present"])
+        self.assertEqual(cols_seen[1], ["always_present"])
+        # Date 2+: sparse_col has values → retained.
+        self.assertEqual(cols_seen[2], ["always_present", "sparse_col"])
+        self.assertEqual(cols_seen[3], ["always_present", "sparse_col"])
+
+    def test_multiindex_empty_callback_result(self):
+        """A callback that always returns {} leaves the sim() result empty."""
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            return {}
+
+        result = sim({"panel": self.panel}, callback, self.dates)
+
+        self.assertEqual(result, {})
+
+    def test_multiindex_mixed_with_datetimeindex(self):
+        """
+        A MultiIndex panel and a plain DatetimeIndex Series can be passed together;
+        each is masked independently by its own index type.
+        """
+        market = pd.Series(
+            np.arange(len(self.dates), dtype=float),
+            index=self.dates,
+            name="market_return",
+        )
+        n_panel_rows: list[int] = []
+        market_vals: list[float] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            n_panel_rows.append(len(data["panel"]))
+            market_vals.append(float(data["market"].iloc[-1]))
+            return {}
+
+        sim({"panel": self.panel, "market": market}, callback, self.dates)
+
+        n_sym = len(self.symbols)
+        self.assertEqual(
+            n_panel_rows, [n_sym * (i + 1) for i in range(len(self.dates))]
+        )
+        # market[i] == i (0-based) — each step exposes one more market observation.
+        self.assertEqual(market_vals, list(range(len(self.dates))))
 
 
 if __name__ == "__main__":

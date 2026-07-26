@@ -33,7 +33,11 @@ def sim(
 
     Args:
         data: Dictionary mapping labels to pandas DataFrames and/or Series
-            containing time series data. All objects must have a DatetimeIndex.
+            containing time series data.  Each object must have either a
+            DatetimeIndex or a MultiIndex whose *first* level is a DatetimeIndex
+            (e.g. a (date, symbol) cross-sectional panel).  For MultiIndex
+            objects, masking at each timestamp retains all rows whose first-level
+            date is <= that timestamp; the remaining levels are untouched.
         callback: Function that processes the masked data and returns a dictionary of results.
             The function should accept a dictionary of DataFrames/Series and return a dictionary
             mapping labels to DataFrames or Series.
@@ -53,12 +57,24 @@ def sim(
         ValueError: If the callback function doesn't return a dictionary of DataFrames or Series.
         ValueError: If the callback function raises an exception.
     """
-    # Validate input data
+    # Validate input data.
+    # Accepted index types:
+    #   • DatetimeIndex — standard time series (masking: index <= timestamp)
+    #   • MultiIndex whose first level is a DatetimeIndex — cross-sectional panel data
+    #     such as (date, symbol); masking is applied on the first level only, so the
+    #     full row is included whenever its date <= timestamp.
     for label, obj in data.items():
-        if not isinstance(obj.index, pd.DatetimeIndex):
+        if isinstance(obj.index, pd.MultiIndex):
+            if not isinstance(obj.index.levels[0], pd.DatetimeIndex):
+                raise ValueError(
+                    f"Data object '{label}' has a MultiIndex whose first level must be "
+                    f"a DatetimeIndex for time-based masking, "
+                    f"got {type(obj.index.levels[0])}"
+                )
+        elif not isinstance(obj.index, pd.DatetimeIndex):
             raise ValueError(
-                f"Data object '{label}' must have a DatetimeIndex, "
-                f"got {type(obj.index)}"
+                f"Data object '{label}' must have a DatetimeIndex or a MultiIndex "
+                f"with a DatetimeIndex as its first level, got {type(obj.index)}"
             )
 
     # Initialize results dictionary
@@ -74,8 +90,16 @@ def sim(
     for timestamp in iterator:
         try:
             # Mask data for current timestamp.
+            # For MultiIndex data (e.g. panel with (date, symbol) index), mask on the
+            # first level so every row whose date <= timestamp is included.
+            # For ordinary DatetimeIndex data the standard scalar comparison is used.
             masked_data = {
-                label: obj[obj.index <= timestamp] for label, obj in data.items()
+                label: (
+                    obj[obj.index.get_level_values(0) <= timestamp]
+                    if isinstance(obj.index, pd.MultiIndex)
+                    else obj[obj.index <= timestamp]
+                )
+                for label, obj in data.items()
             }
 
             # Note that this masking above does not remove columns
@@ -83,6 +107,10 @@ def sim(
             # Drop pd.DataFrame columns that are all None.
             # This ensures that the callback function only sees the columns
             # that are available at the current timestamp.
+            # For MultiIndex DataFrames the drop still applies: a factor column that
+            # is entirely absent (all NaN) in the masked window is removed.  Callbacks
+            # should guard against this with an active-column check when they rely on
+            # a fixed list of column names (e.g. style_cols).
             masked_data = {
                 label: (
                     obj.dropna(axis=1, how="all")
@@ -145,5 +173,5 @@ def sim(
     # Empty DataFrame results contribute (0, 0) frames that add no rows.
     combined: Dict[str, pd.DataFrame] = {}
     for label, df_list in results.items():
-        combined[label] = pd.concat(df_list, copy=False).copy()
+        combined[label] = pd.concat(df_list).copy()
     return combined
