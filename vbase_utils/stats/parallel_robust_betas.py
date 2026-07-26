@@ -1,96 +1,24 @@
-"""Parallel Robust timeseries regression module.
+"""Parallel robust timeseries regression.
 
-Parallelizes the per-asset RLM fits across processes via joblib. Workers pin BLAS
-to a single thread (see :func:`_init_blas_single_thread`): without this, many
-worker processes each spawning default BLAS threads oversubscribe the machine and
-collapse throughput to roughly one effective core -- the actual cause of the slow
-parallel runs, independent of how the work is partitioned.
+Thin wrapper over :func:`vbase_utils.stats._fast_betas.compute_betas_fast`, which
+fans the per-asset Huber-RLM fits out across processes in chunked asset blocks
+(one joblib task per block, numpy + numba workers with BLAS pinned to a single
+thread). See that module for the rationale; the fit itself is the numba/JIT
+hand-rolled Huber RLM (bit-faithful to statsmodels).
 """
 
 import logging
-import os
 
-import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from joblib import Parallel, delayed
 
-from vbase_utils.stats.robust_betas import (
-    check_min_timestamps_series,
-    prepare_weighted_regression_inputs,
-)
+from vbase_utils.stats._fast_betas import compute_betas_fast
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-def _init_blas_single_thread() -> None:
-    """Worker initializer that pins BLAS to a single thread.
-
-    With one worker process per core, default per-process BLAS threading would
-    oversubscribe the machine (processes x BLAS threads). The RLM matrices are
-    tiny (1-2 factor columns) so BLAS does not multithread them anyway, but we
-    pin defensively; thread count affects scheduling only, never values. loky
-    spawns fresh workers, so setting the env here takes effect before numpy/BLAS
-    is imported in the worker.
-    """
-    for var in (
-        "OMP_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-    ):
-        os.environ[var] = "1"
-
-
-def _compute_single_asset_beta(
-    asset: str,
-    df_asset_rets: pd.DataFrame,
-    x_weighted: pd.DataFrame,
-    sqrt_weights: np.ndarray,
-    min_timestamps: int,
-):
-    """Compute beta for a single asset - extracted for parallelization.
-
-    Args:
-        asset: Asset name/column identifier
-        df_asset_rets: DataFrame of asset returns
-        x_weighted: Weighted factor returns DataFrame
-        sqrt_weights: Square root of exponential weights
-        min_timestamps: Minimum timestamps required for regression
-
-    Returns:
-        Tuple of (asset, params) where params is None if insufficient data
-        or the RLM fit raises a linear-algebra/zero-division error.
-    """
-    y = df_asset_rets[asset].values
-    y_weighted: np.ndarray = y * sqrt_weights
-
-    y_weighted_filtered, y_valid_mask = check_min_timestamps_series(
-        y_weighted, min_timestamps
-    )
-    if y_weighted_filtered.size == 0:
-        return asset, None
-
-    y_weighted = y_weighted_filtered
-
-    x_w_const: pd.DataFrame = sm.add_constant(x_weighted.loc[y_valid_mask])
-    # Statsmodels does not apply weights to constant, apply manually.
-    x_w_const["const"] = x_w_const["const"] * sqrt_weights[y_valid_mask]
-    rlm_model = sm.RLM(y_weighted, x_w_const, M=sm.robust.norms.HuberT())
-    try:
-        rlm_results = rlm_model.fit()
-    except (np.linalg.LinAlgError, ZeroDivisionError) as e:
-        logger.exception("Error fitting RLM model for asset %s: %s", asset, e)
-        return asset, None
-
-    return asset, rlm_results.params
-
-
-# The function must take a large number of arguments
-# and consequently has a large number of local variables.
-# pylint: disable=too-many-arguments, too-many-locals
+# pylint: disable=too-many-arguments, too-many-positional-arguments
 def parallel_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,
@@ -99,7 +27,10 @@ def parallel_robust_betas(
     min_timestamps: int = 10,
     n_jobs: int = -1,
 ) -> pd.DataFrame:
-    """Perform robust regression (RLM) with exponential time-weighting.
+    """Perform robust regression (Huber RLM) with exponential time-weighting.
+
+    Fits are parallelized across chunked asset blocks; the result is identical to
+    the serial :func:`vbase_utils.stats.robust_betas.robust_betas`.
 
     Args:
         df_asset_rets: DataFrame of dependent returns with shape (n_timestamps, n_assets).
@@ -126,29 +57,11 @@ def parallel_robust_betas(
             Note: insufficient timestamps (< min_timestamps) returns an all-NaN
             beta matrix with a warning rather than raising.
     """
-    # prepare_weighted_regression_inputs validates inputs and initializes shared matrices.
-    df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
-        df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
+    return compute_betas_fast(
+        df_asset_rets,
+        df_fact_rets,
+        half_life=half_life,
+        lambda_=lambda_,
+        min_timestamps=min_timestamps,
+        n_jobs=n_jobs,
     )
-    # If not enough timestamps, return the all-NaN beta matrix.
-    if sqrt_weights is None or x_weighted is None:
-        return df_betas
-
-    # Use parallel processing for asset regressions. Pin BLAS to one thread per
-    # worker so n_jobs processes do not oversubscribe the machine with BLAS
-    # threads (the dominant cause of poor multi-core utilization here).
-    results = Parallel(
-        n_jobs=n_jobs, initializer=_init_blas_single_thread, inner_max_num_threads=1
-    )(
-        delayed(_compute_single_asset_beta)(
-            asset, df_asset_rets, x_weighted, sqrt_weights, min_timestamps
-        )
-        for asset in df_asset_rets.columns
-    )
-
-    # Fill results back into DataFrame
-    for asset, params in results:
-        if params is not None:
-            df_betas[asset] = params
-
-    return df_betas
