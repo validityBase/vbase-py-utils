@@ -76,6 +76,8 @@ def _wls_deviance(resid, w, df_resid, t):
     for i in range(resid.size):
         wr = math.sqrt(w[i]) * resid[i]
         ss += wr * wr
+    if df_resid <= 0:
+        return 0.0
     wls_scale = ss / df_resid
     if not wls_scale > 0.0:
         return 0.0
