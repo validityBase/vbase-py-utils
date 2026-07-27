@@ -1,4 +1,4 @@
--r ../../requirements.in
+-r ../requirements.in
 -r tools.in
 
 black>=26.5.1
