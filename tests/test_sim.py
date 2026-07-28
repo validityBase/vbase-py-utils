@@ -57,7 +57,7 @@ class TestSim(unittest.TestCase):
         self.assertEqual(result["values"].iloc[-1]["all"], 555)  # 5 + 50 + 500
 
     def test_invalid_index(self):
-        """Test that a plain integer Index (neither DatetimeIndex nor MultiIndex) raises ValueError."""
+        """Test that an integer Index (not DatetimeIndex or MultiIndex) raises ValueError."""
         df = pd.DataFrame({"A": [1, 2, 3]}, index=[1, 2, 3])
         time_index = pd.date_range("2023-01-01", periods=3)
 
@@ -216,6 +216,41 @@ class TestSim(unittest.TestCase):
         self.assertIn("predictions", result)
         self.assertTrue(result["predictions"].empty)
 
+    def test_on_result_streaming_mode(self):
+        """on_result sink is called with the authoritative loop timestamp;
+        sim() returns an empty dict while side effects capture each result."""
+        # Extend time_index one day past the data end so the final loop
+        # timestamp (2023-01-06) differs from the masked data's last row
+        # (2023-01-05), confirming the sink receives the loop timestamp.
+        time_index = pd.DatetimeIndex(
+            list(self.time_index) + [self.time_index[-1] + pd.Timedelta(days=1)]
+        )
+        sink_calls: list[tuple[pd.Timestamp, dict]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.Series]:
+            return {"v": pd.Series([data["df1"]["A"].iloc[-1]], index=["val"])}
+
+        returned = sim(
+            self.sample_data,
+            callback,
+            time_index,
+            on_result=lambda ts, r: sink_calls.append((ts, r)),
+        )
+
+        # (2) Returned dict is empty — nothing is accumulated.
+        self.assertEqual(returned, {})
+        # Sink is called once per timestamp.
+        self.assertEqual(len(sink_calls), len(time_index))
+        for i, (ts, result_dict) in enumerate(sink_calls):
+            # (1) Sink receives the loop timestamp, not masked data's last index.
+            self.assertEqual(ts, time_index[i])
+            self.assertIn("v", result_dict)
+            self.assertIsInstance(result_dict["v"], pd.Series)
+        # At the final step the loop timestamp (2023-01-06) is past the data;
+        # the callback still ran and the sink captured the last data value.
+        self.assertEqual(sink_calls[-1][0], time_index[-1])
+        self.assertEqual(sink_calls[-1][1]["v"].iloc[0], 5.0)
+
     def test_callback_returns_empty_for_early_timestamps(self):
         """Test that empty Series results become NaN rows alongside valid rows."""
         cutoff = self.dates[2]  # 2023-01-03; first 2 timestamps return empty
@@ -337,7 +372,7 @@ class TestSimMultiIndex(unittest.TestCase):
         df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]}, index=mi)
         time_index = pd.date_range("2023-01-01", periods=2)
 
-        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+        def callback(_data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
             return {}
 
         with self.assertRaisesRegex(ValueError, "first level must be a DatetimeIndex"):
@@ -378,7 +413,7 @@ class TestSimMultiIndex(unittest.TestCase):
     def test_multiindex_empty_callback_result(self):
         """A callback that always returns {} leaves the sim() result empty."""
 
-        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+        def callback(_data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
             return {}
 
         result = sim({"panel": self.panel}, callback, self.dates)

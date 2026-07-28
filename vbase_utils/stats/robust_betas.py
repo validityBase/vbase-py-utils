@@ -131,6 +131,16 @@ def _validate_beta_inputs(
         # Return the timestamp count and all-NaN beta matrix.
         return n_timestamps, df_betas, False
 
+    # Non-finite factors (NaN/inf) are shared across all assets, so a single bad
+    # value invalidates the whole date. Skip it (all-NaN betas) rather than
+    # raising, so a simulation continues past isolated dirty factor dates.
+    if not np.isfinite(df_fact_rets.to_numpy()).all():
+        logger.warning(
+            "Non-finite (NaN/inf) factor value(s) at %s; skipping date (all-NaN betas).",
+            df_fact_rets.index[-1],
+        )
+        return n_timestamps, df_betas, False
+
     # Check for near-zero variance in df_fact_rets.
     if df_fact_rets.var().min() < NEAR_ZERO_VARIANCE_THRESHOLD:
         logger.error("One or more factors in df_fact_rets have near-zero variance.")

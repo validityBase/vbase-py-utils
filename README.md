@@ -51,7 +51,8 @@ Create a `.env` file in the project root with the following variables:
 guarantees the callback never sees data from the future.
 
 At each timestamp `t` in `time_index`:
-1. Every object in `data` is **masked** to rows where `index <= t`.
+1. Every object in `data` is **masked** to rows where `index <= t` (or
+   `first_level <= t` for MultiIndex inputs — see table below).
 2. DataFrame columns that are **entirely NaN** in the masked window are dropped
    (so the callback sees only "live" columns — useful for datasets where new
    features are added over time).

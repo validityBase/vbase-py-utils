@@ -1,7 +1,7 @@
 """Time-based simulation module for processing time series data."""
 
 import logging
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 from tqdm import tqdm
@@ -22,6 +22,9 @@ def sim(
     ],
     time_index: pd.DatetimeIndex,
     progress: bool = False,
+    on_result: Optional[
+        Callable[[pd.Timestamp, Dict[str, pd.DataFrame | pd.Series]], None]
+    ] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Simulate processing of time series data using a callback function.
 
@@ -44,6 +47,16 @@ def sim(
         time_index: DatetimeIndex specifying the simulation timestamps.
             The function will process data up to each timestamp in this index.
         progress: Whether to show a progress bar during simulation. Defaults to False.
+        on_result: Optional streaming sink. When provided, it is called as
+            ``on_result(timestamp, result_dict)`` for each timestamp with a
+            non-skipped callback result, and the result is NOT retained or
+            concatenated -- the returned dict is empty. This lets callers write
+            each timestamp's result straight into a preallocated structure and
+            keep peak memory flat instead of holding every per-timestamp frame
+            until the final concat. When None (default), results are accumulated
+            and concatenated as before. The loop timestamp passed here is
+            authoritative (it may differ from the masked data's last index when
+            ``time_index`` is not a subset of the data index).
 
     Returns:
         Dictionary mapping labels to DataFrames containing the concatenated callback
@@ -80,6 +93,14 @@ def sim(
     # Initialize results dictionary
     results: Dict[str, List[pd.DataFrame]] = {}
 
+    # Pre-compute level-0 DatetimeIndex for MultiIndex objects once; it is
+    # invariant across timestamps and get_level_values() is non-trivial.
+    level0: Dict[str, pd.Index] = {
+        label: obj.index.get_level_values(0)
+        for label, obj in data.items()
+        if isinstance(obj.index, pd.MultiIndex)
+    }
+
     # Process each timestamp
     iterator = (
         # Use tqdm to report progress if progress is True.
@@ -95,8 +116,8 @@ def sim(
             # For ordinary DatetimeIndex data the standard scalar comparison is used.
             masked_data = {
                 label: (
-                    obj[obj.index.get_level_values(0) <= timestamp]
-                    if isinstance(obj.index, pd.MultiIndex)
+                    obj[level0[label] <= timestamp]
+                    if label in level0
                     else obj[obj.index <= timestamp]
                 )
                 for label, obj in data.items()
@@ -147,6 +168,14 @@ def sim(
                         f"got {type(result)} for key '{label}'"
                     )
 
+            # Streaming mode: hand the authoritative loop timestamp and the raw
+            # result to the sink and retain nothing. This keeps peak memory flat
+            # for callers that write straight into a preallocated structure.
+            if on_result is not None:
+                on_result(timestamp, result_dict)
+                continue
+
+            for label, result in result_dict.items():
                 # Initialize list for this label if it doesn't exist
                 if label not in results:
                     results[label] = []
