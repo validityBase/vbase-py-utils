@@ -11,6 +11,30 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+def _mask_to(
+    obj: pd.DataFrame | pd.Series,
+    date_key: pd.Index,
+    is_sorted: bool,
+    timestamp: pd.Timestamp,
+) -> pd.DataFrame | pd.Series:
+    """Return the rows of ``obj`` whose date key is <= ``timestamp``.
+
+    When the date key is sorted the cut point is found by binary search and the
+    mask becomes a positional slice: O(log n) and a view rather than a copy.
+    The boolean fallback builds a mask over every row of the object and then
+    fancy-indexes it, so both its cost and its allocation scale with the whole
+    object on every timestamp -- quadratic over the simulation, and heaviest on
+    a (date, symbol) panel where the row count is dates x symbols.
+
+    ``side="right"`` yields the number of entries <= ``timestamp``, matching the
+    boolean path exactly, including for timestamps absent from the data index.
+    """
+    if is_sorted:
+        n_rows = int(date_key.searchsorted(timestamp, side="right"))
+        return obj.iloc[:n_rows]
+    return obj[date_key <= timestamp]
+
+
 # Extra variables/branches necessary to filter empty frames while retaining
 # rows where the callback returned NaN. Disable these pylint checks.
 # pylint: disable=too-many-locals, too-many-branches
@@ -94,12 +118,23 @@ def sim(
     # Initialize results dictionary
     results: Dict[str, List[pd.DataFrame]] = {}
 
-    # Pre-compute level-0 DatetimeIndex for MultiIndex objects once; it is
-    # invariant across timestamps and get_level_values() is non-trivial.
-    level0: Dict[str, pd.Index] = {
-        label: obj.index.get_level_values(0)
+    # Pre-compute the date key each object is masked on: level 0 for a
+    # MultiIndex, the index itself otherwise. It is invariant across timestamps
+    # and get_level_values() is non-trivial, so it is built once.
+    date_keys: Dict[str, pd.Index] = {
+        label: (
+            obj.index.get_level_values(0)
+            if isinstance(obj.index, pd.MultiIndex)
+            else obj.index
+        )
         for label, obj in data.items()
-        if isinstance(obj.index, pd.MultiIndex)
+    }
+    # A sorted date key lets each mask be a positional slice located by binary
+    # search instead of a full-length boolean scan plus a copy. Sortedness is
+    # not guaranteed, so it is checked once here and unsorted objects keep the
+    # boolean path; see _mask_to.
+    sorted_keys: Dict[str, bool] = {
+        label: bool(key.is_monotonic_increasing) for label, key in date_keys.items()
     }
 
     # Process each timestamp
@@ -116,11 +151,7 @@ def sim(
             # first level so every row whose date <= timestamp is included.
             # For ordinary DatetimeIndex data the standard scalar comparison is used.
             masked_data = {
-                label: (
-                    obj[level0[label] <= timestamp]
-                    if label in level0
-                    else obj[obj.index <= timestamp]
-                )
+                label: _mask_to(obj, date_keys[label], sorted_keys[label], timestamp)
                 for label, obj in data.items()
             }
 
@@ -187,7 +218,31 @@ def sim(
                     df_result = pd.DataFrame([result], index=[timestamp])
                 else:
                     # If we have a DataFrame, add the timestamp index.
-                    df_result = pd.concat([result], keys=[timestamp], names=["t", None])
+                    # keys= adds one level, so the concatenated index has
+                    # 1 + result.index.nlevels levels and names must cover all
+                    # of them. A callback fed a (date, symbol) panel naturally
+                    # returns a MultiIndex, which a fixed two-element names
+                    # rejected outright.
+                    #
+                    # The result's own level names are carried through rather
+                    # than blanked, so a panel result stays addressable by name
+                    # (get_level_values("date")). A result with an unnamed index
+                    # still yields ["t", None] exactly as before; one with a
+                    # named index keeps that name instead of having it dropped.
+                    #
+                    # The "t" level is added unconditionally, even when the
+                    # result carries its own date level. It is redundant only
+                    # for a callback returning exactly the current
+                    # cross-section; for one returning a window, "t" is the
+                    # as-of date and the inner level is the observation date,
+                    # and dropping it would collide the rows that different
+                    # as-of dates contribute for the same key. Callbacks that
+                    # do not want it can reindex before returning.
+                    df_result = pd.concat(
+                        [result],
+                        keys=[timestamp],
+                        names=["t"] + list(result.index.names),
+                    )
                 results[label].append(df_result)
 
         except Exception as e:
