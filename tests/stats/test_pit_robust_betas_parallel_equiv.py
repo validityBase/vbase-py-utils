@@ -51,14 +51,16 @@ def _make_returns(
 
 
 def _assert_equiv(parallel: dict, serial: dict) -> None:
-    """Assert parallel and serial result dicts match (exact, atol=1e-6 fallback)."""
+    """Assert parallel and serial result dicts match bit for bit.
+
+    Exact equality holds because both paths pin BLAS to a single thread, so the
+    LAPACK reduction order inside the IRLS loop is the same in the parent as in
+    the workers. Without that pinning the two differ at ~1e-14 and the result
+    also depends on the machine's ambient thread count, so this assertion is the
+    regression gate for the pinning.
+    """
     for key in ("df_betas", "df_asset_resids"):
-        try:
-            assert_frame_equal(parallel[key], serial[key], check_exact=True)
-        except AssertionError:
-            # Fall back to a tight tolerance if exact equality is flaky across
-            # process boundaries; still a strong correctness gate.
-            assert_frame_equal(parallel[key], serial[key], rtol=0, atol=1e-6)
+        assert_frame_equal(parallel[key], serial[key], check_exact=True)
 
 
 class TestPitParallelEquivalence(unittest.TestCase):

@@ -3,8 +3,10 @@
 import logging
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 from joblib import Parallel
+from threadpoolctl import threadpool_limits
 
 from vbase_utils.sim import sim
 from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
@@ -29,6 +31,7 @@ def pit_robust_betas(
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
     n_jobs: int = -1,
+    require_all_factors: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -45,9 +48,10 @@ def pit_robust_betas(
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
         parallel: If True, fan the per-asset Huber-RLM fits out across processes in
-            chunked asset blocks (numpy + numba workers, BLAS pinned to one thread per
-            worker); otherwise run them serially. Numerically identical either way.
-            Defaults to False.
+            chunked asset blocks (numpy + numba workers); otherwise run them
+            serially. Both paths pin BLAS to a single thread, which makes them
+            bit-identical to each other and reproducible regardless of the
+            machine's ambient BLAS thread count. Defaults to False.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
             least one asset has a valid beta. Defaults to False.
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
@@ -57,6 +61,21 @@ def pit_robust_betas(
             -1 (use all available cores). Peak memory scales roughly linearly with the
             worker count, so on wide panels lower ``n_jobs`` (e.g. 6-8) to cap the
             memory footprint at some throughput cost.
+        require_all_factors: Controls how a timestamp with a missing factor beta is
+            totalled into ``df_hedge_rets``. A factor drops out of a window when its
+            own history has not started yet, since the point-in-time mask removes
+            all-NaN factor columns; the remaining factors are still fit and hedged.
+            When False (the default) the total sums the factors that are available
+            and treats the missing one as zero, so the date is partially hedged and
+            reported as an ordinary number. When True the total is NaN unless every
+            factor contributed, which marks the date as one that could not be fully
+            hedged and propagates to ``df_asset_resids``. Prefer True when the
+            residuals feed research or risk attribution, where an unhedged factor is
+            a wrong number rather than a missing one; the default preserves the
+            partial hedge for callers constructing a hedged book. Note that
+            ``fill_missing_betas`` does not cover this case: it only fills factor
+            rows where some asset already has a beta, so a factor absent from the
+            whole window stays NaN. Defaults to False.
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -80,11 +99,14 @@ def pit_robust_betas(
         raise ValueError("df_asset_rets must have a DatetimeIndex")
     if not isinstance(df_fact_rets.index, pd.DatetimeIndex):
         raise ValueError("df_fact_rets must have a DatetimeIndex")
-    # Ensure timestamps are sorted.
+    # Ensure timestamps are sorted. Rebind to a sorted copy rather than sorting
+    # in place: these frames belong to the caller, and reordering them as a side
+    # effect of computing betas would corrupt state the caller still holds. The
+    # copy is only taken when the input is actually unsorted.
     if not df_asset_rets.index.is_monotonic_increasing:
-        df_asset_rets.sort_index(inplace=True)
+        df_asset_rets = df_asset_rets.sort_index()
     if not df_fact_rets.index.is_monotonic_increasing:
-        df_fact_rets.sort_index(inplace=True)
+        df_fact_rets = df_fact_rets.sort_index()
     # Ensure the indices are the same.
     if not df_asset_rets.index.equals(df_fact_rets.index):
         raise ValueError("df_asset_rets and df_fact_rets must have the same index")
@@ -136,46 +158,63 @@ def pit_robust_betas(
         }
         return dict_ret
 
-    # Create all-NaN DataFrame for betas.
-    # We will update this with the actual values from the simulation.
+    # Preallocate the betas panel as a plain numpy buffer; the frame is built
+    # once after the loop. Filling it through pandas .loc instead requires a
+    # freshly constructed MultiIndex per rebalance date and accounts for ~21% of
+    # total wall clock, the single largest serial cost in the run.
     asset_names = df_asset_rets.columns
     factor_names = list(df_fact_rets.columns)
-    results = {
-        "betas": pd.DataFrame(
-            index=pd.MultiIndex.from_product(
-                [rebalance_time_index, factor_names], names=["timestamp", "factor"]
-            ),
-            columns=asset_names,
-            dtype=float,
-        )
-    }
+    n_facts = len(factor_names)
+    betas_buf = np.full(
+        (len(rebalance_time_index) * n_facts, len(asset_names)), np.nan, dtype=float
+    )
+    # Positional lookups so the sink never touches a pandas index.
+    asset_pos = {name: i for i, name in enumerate(asset_names)}
+    factor_pos = {name: i for i, name in enumerate(factor_names)}
+    timestamp_pos = {ts: i for i, ts in enumerate(rebalance_time_index)}
 
     def write_betas(
         timestamp: pd.Timestamp,
         result_dict: Dict[str, pd.DataFrame | pd.Series],
     ) -> None:
-        """sim() streaming sink: write one date's betas into the preallocated frame.
+        """sim() streaming sink: write one date's betas into the preallocated buffer.
 
-        Assigns straight into the (timestamp, factor) rows of results["betas"] so
-        sim() retains nothing and peak memory stays flat regardless of the number
-        of rebalance dates. beta_matrix is indexed by factor and columned by asset;
-        only the factors/assets present at this date are written, leaving the rest
-        NaN -- identical to the previous DataFrame.update() fill.
+        Writes straight into the (timestamp, factor) rows of betas_buf so sim()
+        retains nothing and peak memory stays flat regardless of the number of
+        rebalance dates. beta_matrix is indexed by factor and columned by asset;
+        only the factors/assets present at this date are written, leaving the
+        rest NaN.
         """
         beta_matrix = result_dict["betas"]
         if beta_matrix.empty:
             return
-        row_index = pd.MultiIndex.from_product(
-            [[timestamp], beta_matrix.index], names=["timestamp", "factor"]
+        # sim() treats its loop timestamp as authoritative and it may differ
+        # from the masked data's last index, so look the row up by label: a
+        # timestamp outside rebalance_time_index raises rather than silently
+        # writing to the wrong row.
+        row_base = timestamp_pos[timestamp] * n_facts
+        rows = np.fromiter(
+            (row_base + factor_pos[f] for f in beta_matrix.index),
+            dtype=np.intp,
+            count=len(beta_matrix.index),
         )
-        results["betas"].loc[row_index, beta_matrix.columns] = beta_matrix.values
+        cols = np.fromiter(
+            (asset_pos[c] for c in beta_matrix.columns),
+            dtype=np.intp,
+            count=len(beta_matrix.columns),
+        )
+        betas_buf[np.ix_(rows, cols)] = beta_matrix.to_numpy(dtype=float)
 
     # Run simulation only if there is sufficient data to produce any betas.
     # The rebalance-date loop runs in sim(); when parallel=True the per-date
     # callback fans the per-asset fits out across processes via
-    # parallel_robust_betas (BLAS pinned per worker). This keeps all cores busy
-    # without dispatch starvation -- benchmarks show no benefit from instead
-    # parallelizing over dates, so the simpler asset-level path is used.
+    # parallel_robust_betas (BLAS pinned per worker).
+    #
+    # On the choice of parallel axis: fanning out over dates instead (panel
+    # shared read-only, one task per block of dates) measures 2-3x faster at
+    # T=500-2000 x N=100 on 12 cores for the same peak memory, since it pays one
+    # barrier rather than one per rebalance date. The asset-level axis is used
+    # here because the streaming sink and pool reuse are built around it.
     if len(df_asset_rets.index) >= min_timestamps:
         sim_args = (
             {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
@@ -192,20 +231,36 @@ def pit_robust_betas(
                 inner_max_num_threads=1,
             ) as par:
                 pool["parallel"] = par
-                # write_betas streams each date straight into results["betas"];
-                # sim() retains nothing, so peak memory does not grow with the
-                # number of rebalance dates.
+                # write_betas streams each date straight into betas_buf; sim()
+                # retains nothing, so peak memory does not grow with the number
+                # of rebalance dates.
                 sim(*sim_args, progress=progress, on_result=write_betas)
             pool["parallel"] = None
         else:
-            sim(*sim_args, progress=progress, on_result=write_betas)
+            # Pin BLAS to one thread for the same reason the workers do. The
+            # designs here are (window x n_factors+1) with a handful of columns,
+            # so a multithreaded LAPACK SVD inside the IRLS loop spends more
+            # time synchronizing threads than solving: pinning measures ~2.4x
+            # faster on this path. It also fixes the reduction order, which is
+            # what makes serial betas reproducible across machines and
+            # bit-identical to the parallel path.
+            with threadpool_limits(limits=1, user_api="blas"):
+                sim(*sim_args, progress=progress, on_result=write_betas)
 
     # Calculate residuals using matrix operations.
 
-    # Get the betas DataFrame and drop the dict reference: after the reindex
-    # below the dict would otherwise pin a second full copy of the panel at peak.
-    df_betas = results["betas"]
-    results.clear()
+    # Wrap the filled buffer once. The DataFrame borrows betas_buf rather than
+    # copying it, and the local reference is dropped so the reindex below does
+    # not pin a second full copy of the panel at peak.
+    df_betas = pd.DataFrame(
+        betas_buf,
+        index=pd.MultiIndex.from_product(
+            [rebalance_time_index, factor_names], names=["timestamp", "factor"]
+        ),
+        columns=asset_names,
+        copy=False,
+    )
+    del betas_buf
 
     # Reindex betas to the new MultiIndex and fill in missing values
     # Create a MultiIndex for the asset returns index
@@ -225,7 +280,12 @@ def pit_robust_betas(
     df_betas = df_betas.groupby(level="factor", sort=False).ffill()
 
     # Shift betas by 1 period so returns at t are hedged using betas from t-1.
-    df_hedge_weights = -1 * df_betas.shift(1)
+    # The shift must run per factor for the same reason the ffill above does:
+    # the index is (timestamp, factor), so a plain shift(1) walks the flattened
+    # rows and hedges date t's FIRST factor with the LAST factor's beta from
+    # t-1, rotating betas across factors on every date. Single-factor panels
+    # cannot expose this, since they hold one row per timestamp.
+    df_hedge_weights = -1 * df_betas.groupby(level="factor", sort=False).shift(1)
 
     # Calculate the predicted returns.
     # We must unstack the factor name column to an index level.
@@ -242,7 +302,13 @@ def pit_robust_betas(
     # below allocates its temporaries.
     del df_hedge_weights
     # Sum across factors for each timestamp-asset combination, then unstack.
-    df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(min_count=1)
+    # Each timestamp group holds one row per factor, so requiring n_facts
+    # non-NaN values yields a total only where every factor was hedged; the
+    # default of 1 totals whatever is available and counts a missing factor as
+    # an unhedged zero. See require_all_factors in the docstring.
+    df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(
+        min_count=n_facts if require_all_factors else 1
+    )
 
     # Calculate the residuals.
     df_asset_resids = df_asset_rets + df_hedge_rets

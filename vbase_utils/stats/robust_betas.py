@@ -16,6 +16,30 @@ logger.addHandler(logging.NullHandler())
 # Threshold for near-zero variance in df_fact_rets.
 NEAR_ZERO_VARIANCE_THRESHOLD = 1e-10
 
+# The no-live-assets condition recurs on every leading rebalance date of a
+# staggered panel, so the warning is emitted once per process; the per-window
+# detail goes to DEBUG. Held in a dict so the flag can be flipped without a
+# global statement.
+_NO_ASSET_COLUMNS_WARNED = {"warned": False}
+
+
+def _warn_no_asset_columns(timestamp) -> None:
+    """Warn that a window contained no assets with data, at most once."""
+    logger.debug(
+        "No asset has any data on or before %s; no betas for this window.",
+        timestamp,
+    )
+    if _NO_ASSET_COLUMNS_WARNED["warned"]:
+        return
+    _NO_ASSET_COLUMNS_WARNED["warned"] = True
+    logger.warning(
+        "No asset has any data on or before %s, so no betas are produced for "
+        "that window; prior betas carry forward once assets have data. This is "
+        "expected at the leading dates of a panel whose assets list later than "
+        "the factors. Further occurrences are logged at DEBUG.",
+        timestamp,
+    )
+
 
 def check_min_timestamps_series(
     arr: NDArray[np.floating], min_timestamps: int
@@ -90,7 +114,14 @@ def _validate_beta_inputs(
 ) -> tuple[int, pd.DataFrame, bool]:
     """Validate beta inputs and build the shared result DataFrame."""
     # Check for empty inputs.
-    if df_asset_rets.empty:
+    # A frame carrying rows but no columns is not a malformed input: callers
+    # that mask point-in-time (sim(), via pit_robust_betas) drop asset columns
+    # that are entirely NaN over the current window, so on a panel with
+    # staggered listings every asset can disappear at an early rebalance date.
+    # That case yields no betas and is handled after the shape checks below. A
+    # frame with no rows at all is a genuine caller error and still raises.
+    no_asset_columns = df_asset_rets.shape[0] > 0 and df_asset_rets.shape[1] == 0
+    if df_asset_rets.empty and not no_asset_columns:
         logger.error("Input DataFrame df_asset_rets is empty.")
         raise ValueError("Input DataFrame df_asset_rets is empty.")
     if df_fact_rets.empty:
@@ -120,6 +151,14 @@ def _validate_beta_inputs(
     df_betas: pd.DataFrame = pd.DataFrame(
         index=df_fact_rets.columns, columns=df_asset_rets.columns, dtype=float
     )
+
+    # No asset has any data in this window. Return no betas rather than raising,
+    # so a simulation continues past the leading dates of a staggered panel;
+    # callers that forward-fill (e.g. pit_robust_betas) start carrying betas
+    # once assets list. This mirrors the non-finite-factor handling below.
+    if no_asset_columns:
+        _warn_no_asset_columns(df_asset_rets.index[-1])
+        return n_timestamps, df_betas, False
 
     # Check minimum timestamps.
     if n_timestamps < min_timestamps:
@@ -234,8 +273,19 @@ def robust_betas(
     if sqrt_weights is None or x_weighted is None:
         return df_betas
 
-    for asset in df_asset_rets.columns:
-        y: np.ndarray = df_asset_rets[asset].values
+    # Hoist both panels out of pandas once. Indexing them per asset through
+    # pandas instead costs a boolean .loc plus a to_numpy for each design
+    # matrix, which dominates the loop on wide panels. Indexing numpy directly
+    # is bit-identical: the same buffers, the same elementwise products, in the
+    # same order.
+    y_all = df_asset_rets.to_numpy(dtype=np.float64)
+    xw = x_weighted.to_numpy()
+    # Results collect into a buffer and are wrapped once at the end; assets that
+    # are skipped or whose fit fails keep the all-NaN row the frame starts with.
+    out = df_betas.to_numpy(dtype=np.float64, copy=True)
+
+    for j, asset in enumerate(df_asset_rets.columns):
+        y: np.ndarray = y_all[:, j]
         y_weighted: np.ndarray = y * sqrt_weights
 
         # Check if there are enough defined values to perform the regression.
@@ -244,19 +294,16 @@ def robust_betas(
         if y_filtered.size == 0:
             # Not enough defined values to perform the regression.
             #  Skip regression for this asset.
-            df_betas[asset] = np.nan
             continue
 
         # Design = [const, factors]. The constant column is the weighted 1s
         # (== sqrt_weights on the valid rows), matching the weighted regression.
-        x_design = np.column_stack(
-            (sqrt_weights[valid_mask], x_weighted.loc[valid_mask].to_numpy())
-        )
+        x_design = np.column_stack((sqrt_weights[valid_mask], xw[valid_mask]))
         params = _fit_asset_betas(asset, y_filtered, x_design)
         if params is not None:
-            df_betas[asset] = params
+            out[:, j] = params
 
-    return df_betas
+    return pd.DataFrame(out, index=df_betas.index, columns=df_betas.columns)
 
 
 def _fit_asset_betas(

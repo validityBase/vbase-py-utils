@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from vbase_utils.stats import robust_betas as robust_betas_module
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
 
 # Constants for test data generation
@@ -16,8 +17,8 @@ STD_ASSET_RETS = 0.005
 DEFAULT_DELTA = 0.2
 
 
-class TestPitRobustBetas(unittest.TestCase):
-    """Unit tests for the pit_robust_betas function."""
+class _PanelFixture(unittest.TestCase):
+    """Shared single-factor panel fixture. Holds no tests of its own."""
 
     @classmethod
     def setUpClass(cls):
@@ -46,6 +47,10 @@ class TestPitRobustBetas(unittest.TestCase):
         self.df_asset_rets = pd.DataFrame(
             {"Asset1": asset1_rets, "Asset2": asset2_rets}, index=self.dates
         )
+
+
+class TestPitRobustBetas(_PanelFixture):
+    """Unit tests for the pit_robust_betas function."""
 
     def test_basic_functionality(self):
         """Test basic functionality with single factor and multiple assets."""
@@ -350,6 +355,295 @@ class TestPitRobustBetas(unittest.TestCase):
         self.assertAlmostEqual(
             betas_with_fill.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
         )
+
+    def test_hedge_returns_use_same_factor_from_prior_date(self):
+        """Hedge weights must come from the SAME factor one timestamp back.
+
+        df_betas is indexed by (timestamp, factor), so a positional shift(1)
+        hedges a date's first factor with the previous date's LAST factor.
+        Single-factor panels cannot detect that (one row per timestamp), so this
+        exercises two factors and asserts the exact identity
+
+            df_hedge_rets_by_fact[t, f] == -1 * df_betas[t-1, f] * fact_rets[t, f]
+
+        at every timestamp and factor, with an exact tolerance rather than
+        DEFAULT_DELTA -- the cross-factor error is far smaller than 0.2 and a
+        loose delta hides it.
+        """
+        iwm_returns = pd.Series(
+            np.random.normal(0, STD_FACT_RETS, self.n_timestamps),
+            index=self.dates,
+            name="IWM",
+        )
+        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns, "IWM": iwm_returns})
+        # Betas differ strongly across factors, so a cross-factor swap is visible.
+        df_asset_rets = pd.DataFrame(
+            {
+                "Asset1": 2.5 * self.spy_returns
+                - 1.5 * iwm_returns
+                + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+            },
+            index=self.dates,
+        )
+
+        results = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        betas = results["df_betas"]["Asset1"]
+        hedge_rets = results["df_hedge_rets_by_fact"]["Asset1"]
+
+        checked = 0
+        for i in range(1, len(self.dates)):
+            for factor in ("SPY", "IWM"):
+                prev_beta = betas.loc[(self.dates[i - 1], factor)]
+                if np.isnan(prev_beta):
+                    continue
+                self.assertAlmostEqual(
+                    hedge_rets.loc[(self.dates[i], factor)],
+                    -1 * prev_beta * df_fact_rets.loc[self.dates[i], factor],
+                    places=12,
+                    msg=(
+                        f"hedge return at {self.dates[i]} for {factor} does not "
+                        f"use that factor's beta from {self.dates[i - 1]}"
+                    ),
+                )
+                checked += 1
+        # Guard against the loop silently checking nothing.
+        self.assertGreater(checked, 100)
+
+    def test_hedge_returns_shift_matches_single_factor_case(self):
+        """A two-factor panel whose second factor is unused must hedge like K=1.
+
+        Cross-checks the per-factor shift from a different angle: adding a
+        factor the asset has no exposure to must not disturb the first factor's
+        hedge returns, which a positional shift does by rotating betas.
+        """
+        results_k1 = pit_robust_betas(
+            self.df_asset_rets, self.df_fact_rets, half_life=30
+        )
+        hedge_k1 = results_k1["df_hedge_rets_by_fact"].xs("SPY", level="factor")[
+            "Asset1"
+        ]
+
+        # Same SPY exposure, plus an independent factor with zero true beta.
+        noise_returns = pd.Series(
+            np.random.normal(0, STD_FACT_RETS, self.n_timestamps),
+            index=self.dates,
+            name="NOISE",
+        )
+        df_fact_rets_k2 = pd.DataFrame(
+            {"SPY": self.spy_returns, "NOISE": noise_returns}
+        )
+        results_k2 = pit_robust_betas(self.df_asset_rets, df_fact_rets_k2, half_life=30)
+        hedge_k2 = results_k2["df_hedge_rets_by_fact"].xs("SPY", level="factor")[
+            "Asset1"
+        ]
+
+        # The SPY betas shift by one timestamp in both runs, so the SPY hedge
+        # returns must track each other closely. A positional shift makes the
+        # K=2 run use NOISE's beta here, which breaks the relationship.
+        common = hedge_k1.dropna().index.intersection(hedge_k2.dropna().index)
+        self.assertGreater(len(common), 50)
+        np.testing.assert_allclose(
+            hedge_k2.loc[common].to_numpy(),
+            hedge_k1.loc[common].to_numpy(),
+            rtol=0.05,
+            atol=1e-4,
+            err_msg="adding an unrelated factor changed the SPY hedge returns",
+        )
+
+
+class TestPitRobustBetasFactorCoverage(_PanelFixture):
+    """Behaviour when assets or factors are absent from part of the panel.
+
+    The point-in-time mask drops all-NaN columns, so an asset that has not
+    listed and a factor whose history has not started both disappear from the
+    window. These cover what the betas and hedge totals do in those cases.
+    """
+
+    def _staggered_panel(self, first_listing):
+        """Asset panel whose assets all start at ``first_listing``, factors from 0.
+
+        Aligning a short asset history onto a longer factor index leaves leading
+        all-NaN asset rows, which sim() strips with dropna(axis=1, how="all").
+        """
+        asset_vals = np.full((self.n_timestamps, 2), np.nan)
+        asset_vals[first_listing:, 0] = (
+            1.5 * self.spy_returns.to_numpy()[first_listing:]
+        ) + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps - first_listing)
+        asset_vals[first_listing:, 1] = (
+            0.8 * self.spy_returns.to_numpy()[first_listing:]
+        ) + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps - first_listing)
+        return pd.DataFrame(asset_vals, index=self.dates, columns=["Asset1", "Asset2"])
+
+    def test_no_live_assets_at_early_dates_does_not_raise(self):
+        """Leading dates where no asset has data yield NaN betas, not an error.
+
+        sim() drops asset columns that are all-NaN over the current window, so a
+        panel whose assets list after the factors presents the callback with a
+        (rows, 0) asset frame at its leading dates. That must degrade to no
+        betas for those dates -- as the insufficient-timestamps and non-finite-
+        factor cases do -- rather than aborting the whole simulation.
+        """
+        first_listing = 20
+        df_asset_rets = self._staggered_panel(first_listing)
+
+        results = pit_robust_betas(df_asset_rets, self.df_fact_rets, half_life=30)
+        df_betas = results["df_betas"]
+
+        # Dates before any asset lists carry no betas.
+        self.assertTrue(
+            df_betas.loc[: self.dates[first_listing - 1]].isna().all().all()
+        )
+        # Betas appear once assets have enough observations, and are sane.
+        last_betas = df_betas.xs(self.dates[-1])
+        self.assertAlmostEqual(
+            last_betas.loc["SPY", "Asset1"], 1.5, delta=DEFAULT_DELTA
+        )
+        self.assertAlmostEqual(
+            last_betas.loc["SPY", "Asset2"], 0.8, delta=DEFAULT_DELTA
+        )
+
+    def test_no_live_assets_matches_trimmed_rebalance_index(self):
+        """Skipping the empty leading dates must not perturb later betas.
+
+        Running over the whole index must give the same betas on the dates a run
+        that rebalances only after the listings also covers -- i.e. the skipped
+        dates contribute nothing rather than shifting the estimates.
+        """
+        first_listing = 20
+        df_asset_rets = self._staggered_panel(first_listing)
+
+        full = pit_robust_betas(df_asset_rets, self.df_fact_rets, half_life=30)
+        trimmed = pit_robust_betas(
+            df_asset_rets,
+            self.df_fact_rets,
+            half_life=30,
+            rebalance_time_index=self.dates[first_listing:],
+        )
+        covered = self.dates[first_listing:]
+        np.testing.assert_array_equal(
+            full["df_betas"].loc[covered].to_numpy(),
+            trimmed["df_betas"].loc[covered].to_numpy(),
+        )
+
+    def test_no_live_assets_warns_once(self):
+        """The no-live-assets warning is emitted once, not once per date."""
+        df_asset_rets = self._staggered_panel(20)
+        # The flag is process-wide; clear it so the count is meaningful here.
+        # pylint: disable=protected-access
+        robust_betas_module._NO_ASSET_COLUMNS_WARNED["warned"] = False
+
+        with self.assertLogs(
+            "vbase_utils.stats.robust_betas", level="WARNING"
+        ) as captured:
+            pit_robust_betas(df_asset_rets, self.df_fact_rets, half_life=30)
+
+        no_asset_warnings = [
+            record
+            for record in captured.records
+            if "No asset has any data" in record.getMessage()
+        ]
+        self.assertEqual(len(no_asset_warnings), 1)
+
+    def _late_factor_panel(self, factor_start):
+        """Panel whose second factor starts late, so it drops out of early windows.
+
+        sim() masks point-in-time and removes all-NaN columns, so a factor whose
+        history has not begun is absent from the regression while the others are
+        still fit. That is the only way one factor's beta is NaN while another's
+        is valid, since the fit itself is joint across factors.
+        """
+        iwm_vals = np.random.normal(0, STD_FACT_RETS, self.n_timestamps)
+        asset_vals = (
+            1.4 * self.spy_returns.to_numpy()
+            + 0.9 * iwm_vals
+            + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+        )
+        iwm_col = iwm_vals.copy()
+        iwm_col[:factor_start] = np.nan
+        df_fact_rets = pd.DataFrame(
+            {"SPY": self.spy_returns.to_numpy(), "IWM": iwm_col}, index=self.dates
+        )
+        df_asset_rets = pd.DataFrame({"Asset1": asset_vals}, index=self.dates)
+        return df_asset_rets, df_fact_rets
+
+    def test_partial_hedge_default_sums_available_factors(self):
+        """By default a date missing one factor still reports a hedge total."""
+        factor_start = 60
+        df_asset_rets, df_fact_rets = self._late_factor_panel(factor_start)
+
+        results = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        probe = self.dates[45]
+
+        # IWM has no beta yet, SPY does.
+        self.assertTrue(np.isnan(results["df_betas"].loc[(probe, "IWM"), "Asset1"]))
+        self.assertFalse(np.isnan(results["df_betas"].loc[(probe, "SPY"), "Asset1"]))
+        # The total is the SPY leg alone, reported as an ordinary number.
+        self.assertFalse(np.isnan(results["df_hedge_rets"].loc[probe, "Asset1"]))
+        self.assertAlmostEqual(
+            results["df_hedge_rets"].loc[probe, "Asset1"],
+            results["df_hedge_rets_by_fact"].loc[(probe, "SPY"), "Asset1"],
+            places=12,
+        )
+        self.assertFalse(np.isnan(results["df_asset_resids"].loc[probe, "Asset1"]))
+
+    def test_require_all_factors_marks_partially_hedged_dates(self):
+        """require_all_factors=True yields NaN where a factor could not be hedged."""
+        factor_start = 60
+        df_asset_rets, df_fact_rets = self._late_factor_panel(factor_start)
+
+        strict = pit_robust_betas(
+            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=True
+        )
+
+        probe = self.dates[45]
+        self.assertTrue(np.isnan(strict["df_hedge_rets"].loc[probe, "Asset1"]))
+        self.assertTrue(np.isnan(strict["df_asset_resids"].loc[probe, "Asset1"]))
+
+    def test_require_all_factors_is_a_noop_when_every_factor_is_hedged(self):
+        """With complete factor histories the flag changes nothing.
+
+        Uses a panel where both factors span the sample, so every date after the
+        one-period shift has a beta for each factor and the two min_count
+        settings must agree exactly.
+        """
+        iwm_returns = pd.Series(
+            np.random.normal(0, STD_FACT_RETS, self.n_timestamps),
+            index=self.dates,
+            name="IWM",
+        )
+        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns, "IWM": iwm_returns})
+        df_asset_rets = pd.DataFrame(
+            {
+                "Asset1": 1.4 * self.spy_returns
+                + 0.9 * iwm_returns
+                + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+            },
+            index=self.dates,
+        )
+
+        strict = pit_robust_betas(
+            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=True
+        )
+        loose = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+
+        covered = loose["df_hedge_rets"]["Asset1"].dropna().index
+        self.assertGreater(len(covered), 50)
+        np.testing.assert_array_equal(
+            strict["df_hedge_rets"].loc[covered, "Asset1"].to_numpy(),
+            loose["df_hedge_rets"].loc[covered, "Asset1"].to_numpy(),
+        )
+
+    def test_require_all_factors_defaults_to_current_behavior(self):
+        """Omitting require_all_factors matches passing it as False."""
+        df_asset_rets, df_fact_rets = self._late_factor_panel(60)
+        default = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        explicit = pit_robust_betas(
+            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=False
+        )
+        for key in ("df_hedge_rets", "df_asset_resids"):
+            np.testing.assert_array_equal(
+                default[key].to_numpy(), explicit[key].to_numpy()
+            )
 
 
 if __name__ == "__main__":
