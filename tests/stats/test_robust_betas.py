@@ -185,6 +185,22 @@ class TestRobustBetas(unittest.TestCase):
         self.assertTrue(beta_matrix["Asset1"].isna().all())
         self.assertFalse(beta_matrix["Asset2"].isna().all())
 
+    def test_non_finite_factor_returns_all_nan_betas(self):
+        """NaN or inf in any factor row must yield all-NaN betas without raising."""
+        df_asset_rets, df_fact_rets = make_single_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
+        )
+        df_fact_rets.iloc[5, 0] = np.nan
+        beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        self.assertTrue(beta_matrix.isna().all().all())
+
+        _, df_fact_rets_inf = make_single_asset_ret_frames(
+            self.spy_returns, self.n_timestamps
+        )
+        df_fact_rets_inf.iloc[10, 0] = np.inf
+        beta_matrix_inf = robust_betas(df_asset_rets, df_fact_rets_inf, half_life=30)
+        self.assertTrue(beta_matrix_inf.isna().all().all())
+
     def test_with_nan_asset_returns(self):
         """NaN in asset returns must not cause shape mismatch when weighting const column."""
         asset_returns = np.concatenate(

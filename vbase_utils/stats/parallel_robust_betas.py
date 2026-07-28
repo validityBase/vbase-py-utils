@@ -90,7 +90,7 @@ def _compute_single_asset_beta(
 
 # The function must take a large number of arguments
 # and consequently has a large number of local variables.
-# pylint: disable=too-many-arguments, too-many-locals
+# pylint: disable=too-many-arguments, too-many-locals, too-many-positional-arguments
 def parallel_robust_betas(
     df_asset_rets: pd.DataFrame,
     df_fact_rets: pd.DataFrame,

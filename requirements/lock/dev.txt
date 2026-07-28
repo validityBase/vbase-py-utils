@@ -4,9 +4,9 @@
 #
 #    pip-compile --allow-unsafe --generate-hashes --no-annotate --output-file=requirements/lock/dev.txt --strip-extras requirements/src/dev.in
 #
-astroid==3.2.4 \
-    --hash=sha256:0e14202810b30da1b735827f78f5157be2bbd4a7a59b7707ca0bfc2fb4c0063a \
-    --hash=sha256:413658a61eeca6202a59231abb473f932038fbcbf1666587f66d482083413a25
+astroid==4.0.4 \
+    --hash=sha256:52f39653876c7dec3e3afd4c2696920e05c83832b9737afc21928f2d2eb7a753 \
+    --hash=sha256:986fed8bcf79fb82c78b18a53352a0b287a73817d6dbcfba3162da36667c49a0
 beautifulsoup4==4.15.0 \
     --hash=sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7 \
     --hash=sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9
@@ -974,9 +974,9 @@ pycparser==3.0 \
 pygments==2.20.0 \
     --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
     --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
-pylint==3.2.7 \
-    --hash=sha256:02f4aedeac91be69fb3b4bea997ce580a4ac68ce58b89eaefeaf06749df73f4b \
-    --hash=sha256:1b7a721b575eaeaa7d39db076b6e7743c993ea44f57979127c517c6c572c803e
+pylint==4.0.6 \
+    --hash=sha256:52f19191bee08bf103f9705ad1a0ece4aa5a0a4ef2bdcbd969375a1e6f6579d5 \
+    --hash=sha256:d11a0e1fdb7b1cd46ec5d6fc78fee8b95f28695b2d6140e5809925f61e32ea54
 pyluach==2.3.0 \
     --hash=sha256:4497b731aef59508b079dbf5f00bc5bf4329ac45090a6cd37b5a83756f0e69ab \
     --hash=sha256:ec6e30669d1df50c9ca160486da44a8195bb4c7a5d3d533990d0c5b03accd281
