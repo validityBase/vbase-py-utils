@@ -135,9 +135,12 @@ def _validate_beta_inputs(
     # value invalidates the whole date. Skip it (all-NaN betas) rather than
     # raising, so a simulation continues past isolated dirty factor dates.
     if not np.isfinite(df_fact_rets.to_numpy()).all():
+        bad_mask = ~np.isfinite(df_fact_rets.to_numpy())
+        bad_timestamps = df_fact_rets.index[bad_mask.any(axis=1)].tolist()
         logger.warning(
-            "Non-finite (NaN/inf) factor value(s) at %s; skipping date (all-NaN betas).",
-            df_fact_rets.index[-1],
+            "Non-finite (NaN/inf) factor value(s) in regression window at %s; "
+            "skipping (all-NaN betas).",
+            bad_timestamps,
         )
         return n_timestamps, df_betas, False
 

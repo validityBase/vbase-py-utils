@@ -194,7 +194,7 @@ class TestRobustBetas(unittest.TestCase):
         beta_matrix = robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         self.assertTrue(beta_matrix.isna().all().all())
 
-        df_fact_rets_inf, _ = make_single_asset_ret_frames(
+        _, df_fact_rets_inf = make_single_asset_ret_frames(
             self.spy_returns, self.n_timestamps
         )
         df_fact_rets_inf.iloc[10, 0] = np.inf

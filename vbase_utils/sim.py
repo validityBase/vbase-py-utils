@@ -66,7 +66,8 @@ def sim(
         no rows; non-empty results with NaN values do contribute rows.
 
     Raises:
-        ValueError: If any input data object doesn't have a DatetimeIndex.
+        ValueError: If any input data object doesn't have a DatetimeIndex or a
+            MultiIndex whose first level is a DatetimeIndex.
         ValueError: If the callback function doesn't return a dictionary of DataFrames or Series.
         ValueError: If the callback function raises an exception.
     """
