@@ -43,6 +43,56 @@ Create a `.env` file in the project root with the following variables:
    pylint $(git ls-files '*.py')
    ```
 
+## Modules
+
+### `vbase_utils.sim` — Causal time-series simulation
+
+`sim(data, callback, time_index)` drives a forward-only simulation loop that
+guarantees the callback never sees data from the future.
+
+At each timestamp `t` in `time_index`:
+1. Every object in `data` is **masked** to rows where `index <= t` (or
+   `first_level <= t` for MultiIndex inputs — see table below).
+2. DataFrame columns that are **entirely NaN** in the masked window are dropped
+   (so the callback sees only "live" columns — useful for datasets where new
+   features are added over time).
+3. `callback(masked_data)` is called with the masked dict.
+4. Return values (`pd.Series` or `pd.DataFrame`) are accumulated and concatenated
+   into the final result dict.
+
+**Accepted index types**
+
+| Index type | Masking rule |
+|---|---|
+| `DatetimeIndex` | `index <= t` |
+| `MultiIndex` with `DatetimeIndex` as first level | `first_level <= t` (e.g. `(date, symbol)` cross-sectional panels) |
+
+**Example — cross-sectional panel**
+
+```python
+from vbase_utils.sim import sim
+import pandas as pd
+import numpy as np
+
+dates = pd.date_range("2020-01-01", periods=52, freq="W")
+symbols = ["AAPL", "MSFT", "GOOG"]
+mi = pd.MultiIndex.from_product([dates, symbols], names=["date", "symbol"])
+panel = pd.DataFrame({"signal": np.random.randn(len(mi))}, index=mi)
+
+def callback(data):
+    t = data["panel"].index.get_level_values("date").max()
+    xs = data["panel"][data["panel"].index.get_level_values("date") == t]["signal"]
+    xs = xs.copy()
+    xs.index = xs.index.get_level_values("symbol")
+    return {"signal_at_t": xs}
+
+result = sim({"panel": panel}, callback, dates, progress=True)
+
+# result["signal_at_t"] is a wide (52 × 3) DataFrame — dates × symbols.
+# Stack back to (date, symbol) MultiIndex:
+long = result["signal_at_t"].stack(dropna=True).rename_axis(["date", "symbol"])
+```
+
 ## Updating Dependencies
 
 Published runtime dependencies are managed through human-edited ranges in
