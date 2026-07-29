@@ -410,6 +410,101 @@ class TestSimMultiIndex(unittest.TestCase):
         self.assertEqual(cols_seen[2], ["always_present", "sparse_col"])
         self.assertEqual(cols_seen[3], ["always_present", "sparse_col"])
 
+    def test_column_drop_matches_dropna_on_every_date(self):
+        """The precomputed column drop agrees with dropna() at every timestamp.
+
+        The live-column decision is made from per-column first-valid dates
+        rather than by rescanning the masked window, so it is checked directly
+        against the operation it replaces, including a column that never holds
+        a value and one that has data early and NaN afterwards.
+        """
+        n_sym = len(self.symbols)
+        n_dates = len(self.dates)
+        df = pd.DataFrame(
+            {
+                "always": np.arange(len(self.panel), dtype=float),
+                # Never valid anywhere in the panel.
+                "never": np.full(len(self.panel), np.nan),
+                # Valid only on the first date, NaN from then on.
+                "early_only": [1.0] * n_sym + [np.nan] * (n_sym * (n_dates - 1)),
+                # Valid only from the third date onward.
+                "late": [np.nan] * (n_sym * 2) + [1.0] * (n_sym * (n_dates - 2)),
+            },
+            index=self.panel.index,
+        )
+        seen: list[list[str]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(sorted(data["panel"].columns.tolist()))
+            return {}
+
+        sim({"panel": df}, callback, self.dates)
+
+        dates_level = df.index.get_level_values("date")
+        expected = [
+            sorted(df[dates_level <= t].dropna(axis=1, how="all").columns.tolist())
+            for t in self.dates
+        ]
+        self.assertEqual(seen, expected)
+        # "never" is absent throughout; "early_only" survives once seen.
+        self.assertNotIn("never", seen[-1])
+        self.assertIn("early_only", seen[-1])
+
+    def test_column_drop_handles_tz_aware_index(self):
+        """A tz-aware date key must not lose its zone in the first-valid dates.
+
+        The first-valid dates are compared against the loop timestamp, so a
+        tz-naive buffer would raise "Cannot compare tz-naive and tz-aware"
+        rather than answering.
+        """
+        dates = pd.date_range("2023-01-01", periods=4, freq="W", tz="America/New_York")
+        mi = pd.MultiIndex.from_product([dates, self.symbols], names=["date", "symbol"])
+        n_sym = len(self.symbols)
+        df = pd.DataFrame(
+            {
+                "always": np.arange(len(mi), dtype=float),
+                "late": [np.nan] * (n_sym * 2) + [1.0] * (n_sym * 2),
+            },
+            index=mi,
+        )
+        seen: list[list[str]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(sorted(data["panel"].columns.tolist()))
+            return {}
+
+        sim({"panel": df}, callback, dates)
+
+        self.assertEqual(seen[0], ["always"])
+        self.assertEqual(seen[-1], ["always", "late"])
+
+    def test_column_drop_survives_duplicate_column_names(self):
+        """Duplicate column names are selected positionally, not by label."""
+        n_sym = len(self.symbols)
+        n_dates = len(self.dates)
+        df = pd.DataFrame(
+            np.column_stack(
+                [
+                    np.arange(len(self.panel), dtype=float),
+                    np.full(len(self.panel), np.nan),
+                    np.array([np.nan] * (n_sym * 2) + [1.0] * (n_sym * (n_dates - 2))),
+                ]
+            ),
+            index=self.panel.index,
+            columns=["dup", "dup", "other"],
+        )
+        seen: list[int] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(data["panel"].shape[1])
+            return {}
+
+        sim({"panel": df}, callback, self.dates)
+
+        # First dates: only the first "dup" is live. Later: "other" joins it.
+        self.assertEqual(seen[0], 1)
+        self.assertEqual(seen[-1], 2)
+
     def test_multiindex_empty_callback_result(self):
         """A callback that always returns {} leaves the sim() result empty."""
 

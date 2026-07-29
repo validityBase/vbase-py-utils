@@ -35,6 +35,54 @@ def _mask_to(
     return obj[date_key <= timestamp]
 
 
+def _first_valid_dates(obj: pd.DataFrame, date_key: pd.Index) -> pd.Series:
+    """Earliest date at which each column of ``obj`` holds a non-NaN value.
+
+    Columns that are NaN throughout get NaT, which compares False against every
+    timestamp and so is never live. This is the whole-object form of the
+    question the per-timestamp all-NaN column drop asks: a column is entirely
+    NaN over the rows up to ``timestamp`` exactly when its first non-NaN value
+    arrives after ``timestamp``. The answer does not depend on the window, so it
+    is computed once here instead of being rediscovered on every date.
+    """
+    key = pd.DatetimeIndex(date_key)
+    # Take the dtype from the key itself. A tz-aware panel must yield tz-aware
+    # values, or the comparison against the loop timestamp raises rather than
+    # answering; a plain datetime64[ns] buffer would silently drop the zone.
+    first = pd.Series(pd.NaT, index=obj.columns, dtype=key.dtype)
+    notna = obj.notna().to_numpy()
+    for j in range(obj.shape[1]):
+        col_notna = notna[:, j]
+        if col_notna.any():
+            # min(), not the first position: the date key may be unsorted.
+            first.iloc[j] = key[col_notna].min()
+    return first
+
+
+def _drop_dead_columns(
+    obj: pd.DataFrame | pd.Series,
+    first_valid: Optional[pd.Series],
+    timestamp: pd.Timestamp,
+) -> pd.DataFrame | pd.Series:
+    """Drop the columns of ``obj`` that hold no value on or before ``timestamp``.
+
+    Equivalent to ``obj.dropna(axis=1, how="all")`` on the masked window, but
+    decided from the precomputed first-valid dates rather than by rescanning it.
+    ``first_valid`` is None for Series inputs, which have no columns to drop.
+
+    The object is returned untouched when every column is live, so the common
+    steady state costs neither a scan nor a copy.
+    """
+    if first_valid is None:
+        return obj
+    live = (first_valid <= timestamp).to_numpy()
+    if live.all():
+        return obj
+    # Positional, not by label: a frame with duplicate column names would
+    # select the wrong columns through a label lookup.
+    return obj.loc[:, live]
+
+
 # Extra variables/branches necessary to filter empty frames while retaining
 # rows where the callback returned NaN. Disable these pylint checks.
 # pylint: disable=too-many-locals, too-many-branches
@@ -68,6 +116,12 @@ def sim(
         callback: Function that processes the masked data and returns a dictionary of results.
             The function should accept a dictionary of DataFrames/Series and return a dictionary
             mapping labels to DataFrames or Series.
+            The masked objects it receives must be treated as read-only. They may
+            be views onto the caller's data rather than copies -- the masking is a
+            positional slice and the all-NaN column drop passes an object through
+            untouched when it drops nothing -- so writing to them can corrupt the
+            input panel and every later window taken from it. Callbacks that need
+            to modify what they are given should copy it first.
         time_index: DatetimeIndex specifying the simulation timestamps.
             The function will process data up to each timestamp in this index.
         progress: Whether to show a progress bar during simulation. Defaults to False.
@@ -136,6 +190,32 @@ def sim(
     sorted_keys: Dict[str, bool] = {
         label: bool(key.is_monotonic_increasing) for label, key in date_keys.items()
     }
+    # Per-column first-valid dates, so the all-NaN column drop below becomes a
+    # comparison over n_columns rather than a rescan of the masked window. See
+    # _first_valid_dates.
+    first_valid: Dict[str, pd.Series] = {
+        label: _first_valid_dates(obj, date_keys[label])
+        for label, obj in data.items()
+        if isinstance(obj, pd.DataFrame)
+    }
+    # A column holding no value anywhere in the panel is dropped at every
+    # timestamp, so drop it once here instead. Left in, it would keep the
+    # live-column check false on every date, so every window would be copied --
+    # exactly the quadratic cost this precomputation exists to remove. One
+    # always-NaN column measured 4x slower than none. The local name is
+    # rebound; the caller's dict is not touched.
+    if any(fv.isna().any() for fv in first_valid.values()):
+        data = {
+            label: (
+                obj.loc[:, first_valid[label].notna().to_numpy()]
+                if label in first_valid
+                else obj
+            )
+            for label, obj in data.items()
+        }
+        first_valid = {
+            label: fv[fv.notna().to_numpy()] for label, fv in first_valid.items()
+        }
 
     # Process each timestamp
     iterator = (
@@ -164,14 +244,16 @@ def sim(
             # is entirely absent (all NaN) in the masked window is removed.  Callbacks
             # should guard against this with an active-column check when they rely on
             # a fixed list of column names (e.g. style_cols).
+            #
+            # A column is entirely NaN over this window exactly when its first
+            # non-NaN value arrives after timestamp, so the precomputed
+            # first-valid dates answer it without touching the window. Calling
+            # dropna() here instead rescanned the whole masked window on every
+            # date -- quadratic over the run, and it copied even when it dropped
+            # nothing. Where no column is dropped the object is passed through
+            # untouched, which is the common case once every column has data.
             masked_data = {
-                label: (
-                    obj.dropna(axis=1, how="all")
-                    # Process pd.DataFrame objects only.
-                    # This operation makes no sense for pd.Series objects.
-                    if isinstance(obj, pd.DataFrame)
-                    else obj
-                )
+                label: _drop_dead_columns(obj, first_valid.get(label), timestamp)
                 for label, obj in masked_data.items()
             }
 
