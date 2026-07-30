@@ -95,15 +95,5 @@ long = result["signal_at_t"].stack(dropna=True).rename_axis(["date", "symbol"])
 
 ## Updating Dependencies
 
-Published runtime dependencies are managed through human-edited ranges in
-`requirements.in`; this file is read by `setup.py` into package metadata and
-must not contain hash-locked pins. Development, test, lint, and lock-generation
-environments are managed through human-edited inputs in `requirements/*.in` and
-generated hash-locked files in `requirements/*.txt`.
-
-Edit the relevant `.in` file, regenerate the matching lock using the commands in
-`internal/specs/python-dependency-hashes.md`, and commit both files. Do not edit
-generated lock files by hand.
-
 See [internal/specs/python-dependency-hashes.md](internal/specs/python-dependency-hashes.md)
-for the exact commands.
+for the dependency layout, lock policy, and regeneration commands.
