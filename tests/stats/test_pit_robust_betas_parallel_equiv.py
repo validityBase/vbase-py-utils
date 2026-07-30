@@ -104,6 +104,37 @@ class TestPitParallelEquivalence(unittest.TestCase):
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
 
+    def test_two_factor_with_holes(self):
+        """Panel with deleted rows: parallel == serial, bit for bit.
+
+        Complete-case deletion is applied in both fit paths, so this is the gate
+        on their agreeing about which rows a window admits. Both must weight the
+        full window and then mask; pre-filtering rows in either path would change
+        the multiply order and break exact equality.
+        """
+        df_asset, df_fact = _make_returns(
+            n=120,
+            betas={"A": [0.5, -0.3], "B": [1.1, 0.4]},
+            factors=["F1", "F2"],
+            seed=11,
+        )
+        # F2 keeps a different calendar: scattered missing prints, plus a late
+        # start so the leading windows are missing the column entirely.
+        df_fact.iloc[:25, 1] = np.nan
+        df_fact.iloc[[40, 41, 77, 98], 1] = np.nan
+        common = {
+            "df_asset_rets": df_asset,
+            "df_fact_rets": df_fact,
+            "half_life": 60.0,
+            "min_timestamps": 20,
+            "rebalance_time_index": df_asset.index,
+        }
+        parallel = pit_robust_betas(**common, parallel=True)
+        serial = pit_robust_betas(**common, parallel=False)
+        _assert_equiv(parallel, serial)
+        # Guard against the test passing because nothing was ever fit.
+        self.assertGreater(parallel["df_betas"].notna().to_numpy().sum(), 0)
+
     def test_rebalance_subset(self):
         """A rebalance_time_index subset: parallel == serial."""
         df_asset, df_fact = _make_returns(

@@ -10,11 +10,44 @@ from threadpoolctl import threadpool_limits
 
 from vbase_utils.sim import sim
 from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
-from vbase_utils.stats.robust_betas import robust_betas
+from vbase_utils.stats.robust_betas import (
+    NEAR_ZERO_VARIANCE_THRESHOLD,
+    finite_column_variances,
+    robust_betas,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+# The incomplete-factor condition recurs on every leading date before the
+# last-listing factor starts, so the warning is emitted once per process; the
+# per-window detail goes to DEBUG. Held in a dict so the flag can be flipped
+# without a global statement.
+_INCOMPLETE_FACTORS_WARNED = {"warned": False}
+
+
+def _warn_incomplete_factors(n_missing: int, n_facts: int, timestamp) -> None:
+    """Warn that a window was missing factor columns, at most once."""
+    logger.debug(
+        "%d of %d factor(s) have no data on or before %s; no betas for this window.",
+        n_missing,
+        n_facts,
+        timestamp,
+    )
+    if _INCOMPLETE_FACTORS_WARNED["warned"]:
+        return
+    _INCOMPLETE_FACTORS_WARNED["warned"] = True
+    logger.warning(
+        "%d of %d factor(s) have no data on or before %s, so no betas are "
+        "produced for that window; betas begin once every factor has data. This "
+        "is expected at the leading dates of a panel whose factors start on "
+        "different dates. Further occurrences are logged at DEBUG.",
+        n_missing,
+        n_facts,
+        timestamp,
+    )
 
 
 # The function must take a large number of arguments
@@ -31,7 +64,6 @@ def pit_robust_betas(
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
     n_jobs: int = -1,
-    require_all_factors: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -61,21 +93,16 @@ def pit_robust_betas(
             -1 (use all available cores). Peak memory scales roughly linearly with the
             worker count, so on wide panels lower ``n_jobs`` (e.g. 6-8) to cap the
             memory footprint at some throughput cost.
-        require_all_factors: Controls how a timestamp with a missing factor beta is
-            totalled into ``df_hedge_rets``. A factor drops out of a window when its
-            own history has not started yet, since the point-in-time mask removes
-            all-NaN factor columns; the remaining factors are still fit and hedged.
-            When False (the default) the total sums the factors that are available
-            and treats the missing one as zero, so the date is partially hedged and
-            reported as an ordinary number. When True the total is NaN unless every
-            factor contributed, which marks the date as one that could not be fully
-            hedged and propagates to ``df_asset_resids``. Prefer True when the
-            residuals feed research or risk attribution, where an unhedged factor is
-            a wrong number rather than a missing one; the default preserves the
-            partial hedge for callers constructing a hedged book. Note that
-            ``fill_missing_betas`` does not cover this case: it only fills factor
-            rows where some asset already has a beta, so a factor absent from the
-            whole window stays NaN. Defaults to False.
+
+    Missing factor data is handled by listwise deletion, matching R's ``lm()``
+    under ``na.omit``. A date on which any factor return is non-finite is dropped
+    from the regression for every asset, so the design always spans a common set
+    of complete rows. A window in which a factor has no data at all -- its
+    history has not started yet -- yields no betas rather than a smaller model on
+    the remaining factors, so betas begin once every factor is live. Both cases
+    leave the date's betas NaN and the forward fill below carries the prior
+    date's betas over the gap.
+
     Returns:
         Dictionary containing:
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
@@ -111,6 +138,41 @@ def pit_robust_betas(
     if not df_asset_rets.index.equals(df_fact_rets.index):
         raise ValueError("df_asset_rets and df_fact_rets must have the same index")
 
+    # Every factor must carry data somewhere in the panel. A window missing any
+    # factor produces no betas (see regression_callback), and point-in-time
+    # masking removes a factor column that is all-NaN over the whole panel at
+    # every date, so a factor with no finite value anywhere would silently void
+    # every date of the run instead of failing. Checked once, here, on the full
+    # panel -- robust_betas only ever sees a window and cannot tell this apart
+    # from a factor whose history has not started yet.
+    x_fact_panel = df_fact_rets.to_numpy()
+    fact_defined = np.isfinite(x_fact_panel).sum(axis=0)
+    dead_facts = [
+        str(name) for name, n in zip(df_fact_rets.columns, fact_defined) if n == 0
+    ]
+    if dead_facts:
+        raise ValueError(
+            "df_fact_rets factor(s) have no finite values anywhere in the panel, "
+            f"so no window could be fit: {dead_facts}"
+        )
+
+    # A factor that never moves is collinear with the regression's intercept, so
+    # every design built on it is singular. robust_betas raises on this per
+    # window; checking the panel here fails before any work rather than at
+    # whichever date happens to hit it first.
+    flat_facts = [
+        str(name)
+        for name, var in zip(
+            df_fact_rets.columns, finite_column_variances(x_fact_panel)
+        )
+        if var < NEAR_ZERO_VARIANCE_THRESHOLD
+    ]
+    if flat_facts:
+        raise ValueError(
+            "df_fact_rets factor(s) have near-zero variance across the panel: "
+            f"{flat_facts}"
+        )
+
     # If rebalance_time_index is not provided, use the asset returns index.
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
@@ -126,6 +188,24 @@ def pit_robust_betas(
         """Callback function to run robust regression on masked data."""
         df_asset_rets = data["df_asset_rets"]
         df_fact_rets = data["df_fact_rets"]
+
+        # Wait until every factor has data before fitting anything. sim() removes
+        # a factor column that is all-NaN over the current window, so a factor
+        # whose history starts later is simply absent from the early windows --
+        # there is no NaN row to delete, and robust_betas would fit a smaller
+        # model on the remaining factors and report success. Producing betas from
+        # a model with a different factor set than the caller asked for is worse
+        # than producing none, so those windows yield nothing and the caller's
+        # forward fill starts once all factors are live.
+        #
+        # n_facts is bound below, after this definition but before sim() runs;
+        # the closure resolves it at call time.
+        if df_fact_rets.shape[1] < n_facts:
+            _warn_incomplete_factors(
+                n_facts - df_fact_rets.shape[1], n_facts, df_fact_rets.index[-1]
+            )
+            # An empty frame short-circuits write_betas, leaving the date NaN.
+            return {"betas": pd.DataFrame()}
 
         # Run robust regression. When parallel, fan the per-asset Huber-RLM fits
         # out across chunked asset blocks (numpy + numba workers, BLAS pinned to one
@@ -302,13 +382,12 @@ def pit_robust_betas(
     # below allocates its temporaries.
     del df_hedge_weights
     # Sum across factors for each timestamp-asset combination, then unstack.
-    # Each timestamp group holds one row per factor, so requiring n_facts
-    # non-NaN values yields a total only where every factor was hedged; the
-    # default of 1 totals whatever is available and counts a missing factor as
-    # an unhedged zero. See require_all_factors in the docstring.
-    df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(
-        min_count=n_facts if require_all_factors else 1
-    )
+    # Each timestamp group holds one row per factor, and a date's betas are now
+    # either present for every factor or absent for all of them -- a window
+    # missing a factor produces none -- so min_count=1 and min_count=n_facts
+    # agree. min_count=1 keeps an all-NaN group NaN rather than totalling it to
+    # zero, which is the only distinction that matters here.
+    df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(min_count=1)
 
     # Calculate the residuals.
     df_asset_resids = df_asset_rets + df_hedge_rets

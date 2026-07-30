@@ -73,12 +73,17 @@ def _init_worker() -> None:
     fit_huber_rlm_params(warm_y, warm_x)
 
 
+# The worker takes every shared matrix it fits against as an explicit argument;
+# they are pickled to the workers, so bundling them into an object would only
+# move the argument list rather than shorten it.
+# pylint: disable=too-many-arguments, too-many-positional-arguments
 def _fit_asset_chunk(
     cols: List[str],
     y_weighted_chunk: NDArray[np.floating],
     xw: NDArray[np.floating],
     sqrt_weights: NDArray[np.floating],
     min_timestamps: int,
+    complete_rows: NDArray[np.bool_],
 ) -> List[Tuple[str, Optional[NDArray[np.floating]]]]:
     """Fit a block of assets, returning (col, factor_params or None) per asset.
 
@@ -88,6 +93,9 @@ def _fit_asset_chunk(
         xw: (n, n_factors) time-weighted factor matrix (shared, read-only).
         sqrt_weights: (n,) sqrt of exponential weights (shared, read-only).
         min_timestamps: Minimum non-NaN observations to attempt a fit.
+        complete_rows: (n,) rows on which every factor is finite (shared,
+            read-only). ANDed with each asset's own finite mask, so a date
+            missing any factor is excluded for every asset -- listwise deletion.
 
     Returns:
         List of (col, params) where params are the factor betas (constant
@@ -97,7 +105,10 @@ def _fit_asset_chunk(
     out: List[Tuple[str, Optional[NDArray[np.floating]]]] = []
     for j, col in enumerate(cols):
         yv = y_weighted_chunk[:, j]
+        # Weight first, then mask -- the same order as the serial path, which is
+        # what keeps the two bit-identical (asserted by the equivalence tests).
         mask = np.isfinite(yv)  # drops NaN and +/-inf
+        mask &= complete_rows
         if np.count_nonzero(mask) < min_timestamps:
             out.append((col, None))
             continue
@@ -153,10 +164,12 @@ def compute_betas_fast(
 
     from vbase_utils.stats.robust_betas import prepare_weighted_regression_inputs
 
-    df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
-        df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
+    df_betas, sqrt_weights, x_weighted, complete_rows = (
+        prepare_weighted_regression_inputs(
+            df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
+        )
     )
-    if sqrt_weights is None or x_weighted is None:
+    if sqrt_weights is None or x_weighted is None or complete_rows is None:
         return df_betas
 
     xw = np.ascontiguousarray(x_weighted.to_numpy(), dtype=np.float64)
@@ -192,6 +205,7 @@ def compute_betas_fast(
             xw,
             sqrt_weights,
             min_timestamps,
+            complete_rows,
         )
         for ix in idx_chunks
     )

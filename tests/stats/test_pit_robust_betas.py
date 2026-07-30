@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from vbase_utils.stats import pit_robust_betas as pit_robust_betas_module
 from vbase_utils.stats import robust_betas as robust_betas_module
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
 
@@ -548,9 +549,9 @@ class TestPitRobustBetasFactorCoverage(_PanelFixture):
         """Panel whose second factor starts late, so it drops out of early windows.
 
         sim() masks point-in-time and removes all-NaN columns, so a factor whose
-        history has not begun is absent from the regression while the others are
-        still fit. That is the only way one factor's beta is NaN while another's
-        is valid, since the fit itself is joint across factors.
+        history has not begun is absent from the early windows entirely. Those
+        windows now yield no betas at all rather than a smaller model on the
+        remaining factors.
         """
         iwm_vals = np.random.normal(0, STD_FACT_RETS, self.n_timestamps)
         asset_vals = (
@@ -566,84 +567,168 @@ class TestPitRobustBetasFactorCoverage(_PanelFixture):
         df_asset_rets = pd.DataFrame({"Asset1": asset_vals}, index=self.dates)
         return df_asset_rets, df_fact_rets
 
-    def test_partial_hedge_default_sums_available_factors(self):
-        """By default a date missing one factor still reports a hedge total."""
-        factor_start = 60
-        df_asset_rets, df_fact_rets = self._late_factor_panel(factor_start)
+    def _scattered_holes_panel(self, hole_positions):
+        """Two-factor panel where the second factor is missing on scattered dates.
+
+        Models factors that keep different calendars: the factor exists over the
+        whole sample but has no print on the other's market holidays.
+        """
+        iwm_vals = np.random.normal(0, STD_FACT_RETS, self.n_timestamps)
+        asset_vals = (
+            1.4 * self.spy_returns.to_numpy()
+            + 0.9 * iwm_vals
+            + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
+        )
+        iwm_col = iwm_vals.copy()
+        iwm_col[hole_positions] = np.nan
+        df_fact_rets = pd.DataFrame(
+            {"SPY": self.spy_returns.to_numpy(), "IWM": iwm_col}, index=self.dates
+        )
+        df_asset_rets = pd.DataFrame({"Asset1": asset_vals}, index=self.dates)
+        return df_asset_rets, df_fact_rets
+
+    def test_window_missing_a_factor_produces_no_betas_for_any_factor(self):
+        """A factor with no data yet blocks the window instead of shrinking the model.
+
+        Before its history starts the factor's column is absent from the window
+        entirely, so there is no NaN row to delete. Fitting the remaining factors
+        would silently estimate a different model than the caller asked for, so
+        the window yields nothing and every factor's beta stays NaN.
+        """
+        df_asset_rets, df_fact_rets = self._late_factor_panel(60)
 
         results = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         probe = self.dates[45]
 
-        # IWM has no beta yet, SPY does.
-        self.assertTrue(np.isnan(results["df_betas"].loc[(probe, "IWM"), "Asset1"]))
-        self.assertFalse(np.isnan(results["df_betas"].loc[(probe, "SPY"), "Asset1"]))
-        # The total is the SPY leg alone, reported as an ordinary number.
-        self.assertFalse(np.isnan(results["df_hedge_rets"].loc[probe, "Asset1"]))
-        self.assertAlmostEqual(
-            results["df_hedge_rets"].loc[probe, "Asset1"],
-            results["df_hedge_rets_by_fact"].loc[(probe, "SPY"), "Asset1"],
-            places=12,
-        )
-        self.assertFalse(np.isnan(results["df_asset_resids"].loc[probe, "Asset1"]))
+        for factor in ("SPY", "IWM"):
+            self.assertTrue(
+                np.isnan(results["df_betas"].loc[(probe, factor), "Asset1"]),
+                f"{factor} must have no beta while another factor is absent",
+            )
+        # Nothing to hedge with, so the date carries no hedge return or residual.
+        self.assertTrue(np.isnan(results["df_hedge_rets"].loc[probe, "Asset1"]))
+        self.assertTrue(np.isnan(results["df_asset_resids"].loc[probe, "Asset1"]))
 
-    def test_require_all_factors_marks_partially_hedged_dates(self):
-        """require_all_factors=True yields NaN where a factor could not be hedged."""
+    def test_betas_resume_once_every_factor_has_enough_data(self):
+        """Betas start once the late factor has min_timestamps complete rows.
+
+        Complete-case deletion removes every pre-listing row from the window, so
+        the usable sample restarts at the listing date and betas appear once it
+        reaches min_timestamps.
+        """
+        factor_start = 60
+        min_timestamps = 10
+        df_asset_rets, df_fact_rets = self._late_factor_panel(factor_start)
+
+        results = pit_robust_betas(
+            df_asset_rets,
+            df_fact_rets,
+            half_life=30,
+            min_timestamps=min_timestamps,
+        )
+        betas = results["df_betas"]
+
+        # One row short of the minimum: still nothing.
+        too_early = self.dates[factor_start + min_timestamps - 2]
+        self.assertTrue(np.isnan(betas.loc[(too_early, "SPY"), "Asset1"]))
+        # The first date with enough complete rows produces betas for both factors.
+        first_fit = self.dates[factor_start + min_timestamps - 1]
+        for factor in ("SPY", "IWM"):
+            self.assertFalse(
+                np.isnan(betas.loc[(first_fit, factor), "Asset1"]),
+                f"{factor} must have a beta once every factor has data",
+            )
+
+    def test_late_factor_does_not_freeze_the_other_factors(self):
+        """A late-listing factor must not stop estimation for the whole run.
+
+        Regression test for the defect this replaced: once the late factor's first
+        value arrived, its column survived the point-in-time all-NaN drop but the
+        window still held every earlier NaN row. The window was discarded on that
+        basis, and because the window only grows those rows never aged out -- so
+        every later window was discarded too. The other factors' betas froze at
+        their last pre-listing values and the late factor never got a beta at all.
+        """
         factor_start = 60
         df_asset_rets, df_fact_rets = self._late_factor_panel(factor_start)
 
-        strict = pit_robust_betas(
-            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=True
-        )
+        results = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        betas = results["df_betas"]
+        after = self.dates[factor_start + 15 :]
 
-        probe = self.dates[45]
-        self.assertTrue(np.isnan(strict["df_hedge_rets"].loc[probe, "Asset1"]))
-        self.assertTrue(np.isnan(strict["df_asset_resids"].loc[probe, "Asset1"]))
+        spy_after = betas.xs("SPY", level="factor").loc[after, "Asset1"].dropna()
+        iwm_after = betas.xs("IWM", level="factor").loc[after, "Asset1"].dropna()
 
-    def test_require_all_factors_is_a_noop_when_every_factor_is_hedged(self):
-        """With complete factor histories the flag changes nothing.
+        # Both factors are estimated after the late one lists.
+        self.assertGreater(len(spy_after), 20)
+        self.assertGreater(len(iwm_after), 20)
+        # And the estimates keep moving rather than being carried forward from a
+        # single frozen date. Under the old behavior each of these was 1.
+        self.assertGreater(spy_after.nunique(), 20)
+        self.assertGreater(iwm_after.nunique(), 20)
+        # The betas recover the panel's true coefficients.
+        self.assertAlmostEqual(spy_after.iloc[-1], 1.4, delta=DEFAULT_DELTA)
+        self.assertAlmostEqual(iwm_after.iloc[-1], 0.9, delta=DEFAULT_DELTA)
 
-        Uses a panel where both factors span the sample, so every date after the
-        one-period shift has a beta for each factor and the two min_count
-        settings must agree exactly.
+    def test_scattered_factor_holes_do_not_stop_estimation(self):
+        """Isolated missing factor dates cost those rows, not the window.
+
+        The old behavior discarded any window containing a non-finite factor
+        value, so a factor keeping a different calendar from the others froze
+        estimation from its first missing print onward.
         """
-        iwm_returns = pd.Series(
-            np.random.normal(0, STD_FACT_RETS, self.n_timestamps),
-            index=self.dates,
-            name="IWM",
-        )
-        df_fact_rets = pd.DataFrame({"SPY": self.spy_returns, "IWM": iwm_returns})
-        df_asset_rets = pd.DataFrame(
-            {
-                "Asset1": 1.4 * self.spy_returns
-                + 0.9 * iwm_returns
-                + np.random.normal(0, STD_ASSET_RETS, self.n_timestamps)
-            },
-            index=self.dates,
-        )
+        holes = [12, 33, 34, 57, 81]
+        df_asset_rets, df_fact_rets = self._scattered_holes_panel(holes)
 
-        strict = pit_robust_betas(
-            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=True
-        )
-        loose = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        results = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        spy = results["df_betas"].xs("SPY", level="factor")["Asset1"].dropna()
+        iwm = results["df_betas"].xs("IWM", level="factor")["Asset1"].dropna()
 
-        covered = loose["df_hedge_rets"]["Asset1"].dropna().index
-        self.assertGreater(len(covered), 50)
-        np.testing.assert_array_equal(
-            strict["df_hedge_rets"].loc[covered, "Asset1"].to_numpy(),
-            loose["df_hedge_rets"].loc[covered, "Asset1"].to_numpy(),
-        )
+        # Estimation continues past every hole, including the last one.
+        self.assertIn(self.dates[-1], spy.index)
+        self.assertGreater(spy.nunique(), 50)
+        self.assertGreater(iwm.nunique(), 50)
+        self.assertAlmostEqual(spy.iloc[-1], 1.4, delta=DEFAULT_DELTA)
+        self.assertAlmostEqual(iwm.iloc[-1], 0.9, delta=DEFAULT_DELTA)
 
-    def test_require_all_factors_defaults_to_current_behavior(self):
-        """Omitting require_all_factors matches passing it as False."""
+    def test_incomplete_factor_window_warns_once(self):
+        """The missing-factor condition warns once per process, not per date."""
         df_asset_rets, df_fact_rets = self._late_factor_panel(60)
-        default = pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
-        explicit = pit_robust_betas(
-            df_asset_rets, df_fact_rets, half_life=30, require_all_factors=False
-        )
-        for key in ("df_hedge_rets", "df_asset_resids"):
-            np.testing.assert_array_equal(
-                default[key].to_numpy(), explicit[key].to_numpy()
-            )
+
+        module = "vbase_utils.stats.pit_robust_betas"
+        # pylint: disable=protected-access
+        pit_robust_betas_module._INCOMPLETE_FACTORS_WARNED["warned"] = False
+        with self.assertLogs(module, level="WARNING") as captured:
+            pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+
+        warnings = [
+            record
+            for record in captured.records
+            if "factor(s) have no data on or before" in record.getMessage()
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    def test_factor_with_no_data_anywhere_raises(self):
+        """A factor that is NaN across the whole panel is a caller error.
+
+        Under the all-factors rule such a column would make every window
+        incomplete, silently voiding the entire run, so it fails up front.
+        """
+        df_asset_rets, df_fact_rets = self._late_factor_panel(60)
+        df_fact_rets["DEAD"] = np.nan
+
+        with self.assertRaises(ValueError) as ctx:
+            pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        self.assertIn("DEAD", str(ctx.exception))
+
+    def test_flat_factor_across_the_panel_raises(self):
+        """A factor that never moves is collinear with the intercept."""
+        df_asset_rets, df_fact_rets = self._late_factor_panel(60)
+        df_fact_rets["FLAT"] = 0.01
+
+        with self.assertRaises(ValueError) as ctx:
+            pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        self.assertIn("FLAT", str(ctx.exception))
 
 
 if __name__ == "__main__":
