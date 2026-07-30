@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
+from vbase_utils.stats._fast_betas import compute_betas_fast
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
+from vbase_utils.stats.robust_betas import robust_betas
 
 
 def _make_returns(
@@ -206,6 +208,36 @@ class TestPitParallelEquivalence(unittest.TestCase):
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
         self.assertTrue(parallel["df_betas"]["DEAD"].isna().all())
+
+    def test_duplicate_asset_names_agree_across_paths(self):
+        """Repeated asset names must not misroute betas in the parallel path.
+
+        The parallel collector used a {name: position} map, which keeps only the
+        last occurrence of a duplicate: one asset's betas were written into the
+        other's slot and its own column stayed NaN, while the serial path -- which
+        indexes by position already -- returned both. Fits go straight through
+        compute_betas_fast here, since pit_robust_betas rejects duplicate names
+        before reaching either path.
+        """
+        df_asset, df_fact = _make_returns(
+            n=80,
+            betas={"A": [2.0], "B": [-1.0]},
+            factors=["FACTOR"],
+            seed=17,
+        )
+        df_asset.columns = ["DUP", "DUP"]
+
+        serial = robust_betas(df_asset, df_fact, half_life=30.0, min_timestamps=20)
+        parallel = compute_betas_fast(
+            df_asset, df_fact, half_life=30.0, min_timestamps=20, n_jobs=2
+        )
+
+        assert_frame_equal(parallel, serial, check_exact=True)
+        # Both assets are estimated, at their own distinct betas.
+        self.assertFalse(parallel.isna().any().any())
+        np.testing.assert_allclose(
+            np.sort(parallel.to_numpy().ravel()), [-1.0, 2.0], atol=0.05
+        )
 
     def test_insufficient_timestamps(self):
         """Fewer than min_timestamps rows: all-NaN betas, no sim run, equal paths."""

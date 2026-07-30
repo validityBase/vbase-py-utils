@@ -138,6 +138,26 @@ def pit_robust_betas(
     if not df_asset_rets.index.equals(df_fact_rets.index):
         raise ValueError("df_asset_rets and df_fact_rets must have the same index")
 
+    # Asset and factor names must be unique. The betas panel is filled through
+    # {label: position} maps, which collapse a repeated label so that only its
+    # last occurrence is addressable. A duplicate asset name left one asset's
+    # betas all-NaN; a duplicate factor name was worse, since the unwritten row
+    # is then forward-filled from an earlier window and the wrong beta flows into
+    # df_hedge_rets and df_asset_resids as an ordinary-looking number. Positional
+    # filling is not available here: sim() hands the callback whichever columns
+    # survive its all-NaN drop, so the result is addressed by label. Duplicate
+    # names in a returns panel are a data error, so this rejects them outright.
+    for name, columns in (
+        ("df_asset_rets", df_asset_rets.columns),
+        ("df_fact_rets", df_fact_rets.columns),
+    ):
+        if columns.has_duplicates:
+            duplicates = sorted({str(c) for c in columns[columns.duplicated()]})
+            raise ValueError(
+                f"{name} has duplicate column name(s), which would make betas "
+                f"ambiguous: {duplicates}"
+            )
+
     # Every factor must carry data somewhere in the panel. A window missing any
     # factor produces no betas (see regression_callback), and point-in-time
     # masking removes a factor column that is all-NaN over the whole panel at
@@ -176,6 +196,21 @@ def pit_robust_betas(
     # If rebalance_time_index is not provided, use the asset returns index.
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
+
+    # Rebalance timestamps must be unique for the same reason the names must be:
+    # the sink writes each date by its position in this index. Unlike a duplicate
+    # name this does not corrupt silently -- the betas MultiIndex is built from
+    # this index and pandas raises "cannot handle a non-unique multi-index!" on
+    # the later reindex -- but that surfaces from deep in the call with nothing
+    # naming the cause. Checked here so the message points at the input. Also
+    # covers a df_asset_rets index carrying duplicate timestamps, since that is
+    # what this defaults to.
+    if rebalance_time_index.has_duplicates:
+        duplicates = rebalance_time_index[rebalance_time_index.duplicated()]
+        raise ValueError(
+            "rebalance_time_index has duplicate timestamp(s), which would make "
+            f"betas ambiguous: {sorted(set(duplicates.astype(str)))}"
+        )
 
     # When parallel, a single joblib.Parallel pool is reused across all rebalance
     # dates (kept warm below); the callback reads it from this holder.

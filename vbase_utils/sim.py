@@ -237,7 +237,9 @@ def sim(
 
             # Note that this masking above does not remove columns
             # that are not in the dataset before timestamp.
-            # Drop pd.DataFrame columns that are all None.
+            # Drop pd.DataFrame columns that hold no value over the window.
+            # "No value" is what notna() reports as missing -- NaN, None and NaT
+            # alike -- matching the dropna(axis=1, how="all") this replaced.
             # This ensures that the callback function only sees the columns
             # that are available at the current timestamp.
             # For MultiIndex DataFrames the drop still applies: a factor column that

@@ -730,6 +730,52 @@ class TestPitRobustBetasFactorCoverage(_PanelFixture):
             pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
         self.assertIn("FLAT", str(ctx.exception))
 
+    def test_duplicate_asset_names_raise(self):
+        """Repeated asset names make the betas panel ambiguous.
+
+        The panel is filled through {label: position} maps, which keep only a
+        duplicate's last occurrence, so one asset's betas would be silently lost.
+        """
+        df_asset_rets, df_fact_rets = self._scattered_holes_panel([10])
+        df_asset_rets["Asset1_copy"] = df_asset_rets["Asset1"]
+        df_asset_rets.columns = ["Asset1", "Asset1"]
+
+        with self.assertRaises(ValueError) as ctx:
+            pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        self.assertIn("df_asset_rets", str(ctx.exception))
+        self.assertIn("Asset1", str(ctx.exception))
+
+    def test_duplicate_factor_names_raise(self):
+        """Repeated factor names silently produced a wrong beta before this.
+
+        The unwritten factor row was forward-filled from an earlier window, so a
+        stale beta flowed into df_hedge_rets and df_asset_resids as an ordinary
+        number -- no NaN and no warning to signal it.
+        """
+        df_asset_rets, df_fact_rets = self._scattered_holes_panel([10])
+        df_fact_rets.columns = ["SPY", "SPY"]
+
+        with self.assertRaises(ValueError) as ctx:
+            pit_robust_betas(df_asset_rets, df_fact_rets, half_life=30)
+        self.assertIn("df_fact_rets", str(ctx.exception))
+        self.assertIn("SPY", str(ctx.exception))
+
+    def test_duplicate_rebalance_timestamps_raise(self):
+        """Repeated rebalance dates are rejected with a message naming the input.
+
+        This already failed, but as "cannot handle a non-unique multi-index!"
+        raised from inside pandas on the later reindex, with nothing pointing at
+        the offending argument.
+        """
+        df_asset_rets, df_fact_rets = self._scattered_holes_panel([10])
+        reb = self.dates[[30, 40, 40, 50]]
+
+        with self.assertRaises(ValueError) as ctx:
+            pit_robust_betas(
+                df_asset_rets, df_fact_rets, half_life=30, rebalance_time_index=reb
+            )
+        self.assertIn("rebalance_time_index", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

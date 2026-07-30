@@ -27,7 +27,7 @@ fit is :func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`).
 import logging
 import os
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -84,11 +84,12 @@ def _fit_asset_chunk(
     sqrt_weights: NDArray[np.floating],
     min_timestamps: int,
     complete_rows: NDArray[np.bool_],
-) -> List[Tuple[str, Optional[NDArray[np.floating]]]]:
-    """Fit a block of assets, returning (col, factor_params or None) per asset.
+) -> List[Optional[NDArray[np.floating]]]:
+    """Fit a block of assets, returning one params entry per column of the chunk.
 
     Args:
-        cols: Asset labels for this chunk.
+        cols: Asset labels for this chunk. Used only to label the fit in logs --
+            the results are addressed by position, not by name.
         y_weighted_chunk: (n, len(cols)) already time-weighted asset columns.
         xw: (n, n_factors) time-weighted factor matrix (shared, read-only).
         sqrt_weights: (n,) sqrt of exponential weights (shared, read-only).
@@ -98,11 +99,13 @@ def _fit_asset_chunk(
             missing any factor is excluded for every asset -- listwise deletion.
 
     Returns:
-        List of (col, params) where params are the factor betas (constant
-        dropped), or None if the asset has too few observations or the fit
-        raises a linear-algebra/zero-division error.
+        List positionally aligned with ``cols``: each entry is that asset's
+        factor betas (constant dropped), or None if the asset has too few
+        observations or the fit raises a linear-algebra/zero-division error.
+        Positional rather than keyed by label, since asset names are not
+        guaranteed unique and a duplicate would make one asset unaddressable.
     """
-    out: List[Tuple[str, Optional[NDArray[np.floating]]]] = []
+    out: List[Optional[NDArray[np.floating]]] = []
     for j, col in enumerate(cols):
         yv = y_weighted_chunk[:, j]
         # Weight first, then mask -- the same order as the serial path, which is
@@ -110,7 +113,7 @@ def _fit_asset_chunk(
         mask = np.isfinite(yv)  # drops NaN and +/-inf
         mask &= complete_rows
         if np.count_nonzero(mask) < min_timestamps:
-            out.append((col, None))
+            out.append(None)
             continue
         y_f = yv[mask]
         # Design = [const, factors]. statsmodels add_constant(prepend=True) puts
@@ -120,9 +123,9 @@ def _fit_asset_chunk(
         try:
             params = fit_huber_rlm_params(y_f, x_c, label=col)
         except (np.linalg.LinAlgError, ZeroDivisionError):
-            out.append((col, None))
+            out.append(None)
             continue
-        out.append((col, params[1:]))  # drop the constant, keep factor betas
+        out.append(params[1:])  # drop the constant, keep factor betas
     return out
 
 
@@ -224,11 +227,15 @@ def compute_betas_fast(
     # scales with the asset count and runs entirely in the parent; at 100 assets
     # it accounts for ~12% of total wall clock. The buffer starts as the all-NaN
     # frame's values, so assets that were skipped or failed to fit stay NaN.
+    # Results are written by position, taken from the same index arrays the
+    # chunks were built from. A {name: position} lookup collapses duplicate asset
+    # names -- only the last is addressable -- so with a repeated column one
+    # asset's betas landed in the other's slot and its own stayed NaN, while the
+    # serial path (which indexes by position already) returned both correctly.
     out = df_betas.to_numpy(dtype=np.float64, copy=True)
-    col_pos = {col: k for k, col in enumerate(df_betas.columns)}
-    for chunk in results:
-        for col, params in chunk:
+    for ix, chunk in zip(idx_chunks, results):
+        for pos, params in zip(ix, chunk):
             if params is not None:
-                out[:, col_pos[col]] = params
+                out[:, pos] = params
 
     return pd.DataFrame(out, index=df_betas.index, columns=df_betas.columns)
