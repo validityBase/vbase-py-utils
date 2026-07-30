@@ -13,14 +13,14 @@ Lock files are generated with Python 3.11 for CI parity.
 - `requirements.in` is the human-edited published runtime dependency source.
   It is read by `setup.py`, must use dependency ranges rather than hash-locked
   pins, and is included in source distributions through `MANIFEST.in`.
-- `requirements/src/dev.in` is the human-edited development/test/lint
-  environment input. It includes `../../requirements.in` so CI validates the
+- `requirements/dev.in` is the human-edited development/test/lint
+  environment input. It includes `../requirements.in` so CI validates the
   package's runtime dependency ranges in a terminal environment.
-- `requirements/lock/dev.txt` is generated from `requirements/src/dev.in` and
+- `requirements/dev.txt` is generated from `requirements/dev.in` and
   includes runtime plus development/test/lint dependencies with hashes.
-- `requirements/src/tools.in` is the human-edited lock-regeneration tooling
+- `requirements/tools.in` is the human-edited lock-regeneration tooling
   input.
-- `requirements/lock/tools.txt` is generated from `requirements/src/tools.in`
+- `requirements/tools.txt` is generated from `requirements/tools.in`
   and includes the minimal `pip-tools` environment with hashes.
 
 Do not create a generated base/runtime lock for package metadata. Do not edit
@@ -34,36 +34,36 @@ because a different `pip-tools` version can produce a different lockfile than
 CI.
 
 ```bash
-python -m pip install --require-hashes -r requirements/lock/tools.txt
+python -m pip install --require-hashes -r requirements/tools.txt
 ```
 
 To add or update a published runtime dependency:
 
 ```bash
 # edit requirements.in
-pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/lock/dev.txt requirements/src/dev.in
+pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/dev.txt requirements/dev.in
 ```
 
 To add or update a development/test/lint dependency:
 
 ```bash
-# edit requirements/src/dev.in
-pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/lock/dev.txt requirements/src/dev.in
+# edit requirements/dev.in
+pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/dev.txt requirements/dev.in
 ```
 
 To update the lock-generation tooling, edit the pinned `pip-tools==...`
-constraint in `requirements/src/tools.in`, then regenerate
-`requirements/lock/tools.txt`.
+constraint in `requirements/tools.in`, then regenerate
+`requirements/tools.txt`.
 
 ```bash
-# edit the pip-tools==... pin in requirements/src/tools.in
-pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/lock/tools.txt requirements/src/tools.in
+# edit the pip-tools==... pin in requirements/tools.in
+pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/tools.txt requirements/tools.in
 ```
 
 Install local development dependencies from the generated lock file:
 
 ```bash
-python -m pip install --require-hashes -r requirements/lock/dev.txt
+python -m pip install --require-hashes -r requirements/dev.txt
 python -m pip install --no-deps --no-build-isolation -e .
 ```
 
@@ -75,7 +75,7 @@ environment lock files, fails if generated files differ from committed files,
 installs the development lock, installs package metadata without resolving
 dependencies again, and runs `python -m pip check`.
 
-The test and lint workflows install `requirements/lock/dev.txt` with
+The test and lint workflows install `requirements/dev.txt` with
 `require-hashes: true` and install the editable package with:
 
 ```bash

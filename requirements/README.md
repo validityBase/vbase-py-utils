@@ -1,10 +1,6 @@
 # Python Requirements
 
-Published package dependencies live in `../requirements.in` as abstract ranges.
-Do not generate a hash-locked runtime requirements file for package metadata.
+This directory contains Python dependency inputs and generated lock files.
 
-Human-edited terminal environment inputs live in `src/`. Generated hash-locked
-terminal environment files live in `lock/`.
-
-Do not edit files in `lock/` by hand. Regenerate them with the documented
-commands in `../internal/specs/python-dependency-hashes.md`.
+See `../internal/specs/python-dependency-hashes.md` for the canonical layout,
+lock policy, and regeneration commands.

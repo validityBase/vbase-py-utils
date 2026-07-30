@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    # Scan repo root for package metadata requirements.in and /requirements
+    # for pip-compile terminal environment inputs/outputs.
+    directories:
+      - "/"
+      - "/requirements"
+    schedule:
+      interval: "daily"
+      time: "00:00"
+      timezone: "Etc/UTC"
+    versioning-strategy: "increase-if-necessary"
+    groups:
+      pip-minor-patch-updates:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      pip-security-updates:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
