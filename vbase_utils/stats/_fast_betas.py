@@ -27,7 +27,7 @@ fit is :func:`vbase_utils.stats._huber_rlm.fit_huber_rlm_params`).
 import logging
 import os
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -73,33 +73,47 @@ def _init_worker() -> None:
     fit_huber_rlm_params(warm_y, warm_x)
 
 
+# The worker takes every shared matrix it fits against as an explicit argument;
+# they are pickled to the workers, so bundling them into an object would only
+# move the argument list rather than shorten it.
+# pylint: disable=too-many-arguments, too-many-positional-arguments
 def _fit_asset_chunk(
     cols: List[str],
     y_weighted_chunk: NDArray[np.floating],
     xw: NDArray[np.floating],
     sqrt_weights: NDArray[np.floating],
     min_timestamps: int,
-) -> List[Tuple[str, Optional[NDArray[np.floating]]]]:
-    """Fit a block of assets, returning (col, factor_params or None) per asset.
+    complete_rows: NDArray[np.bool_],
+) -> List[Optional[NDArray[np.floating]]]:
+    """Fit a block of assets, returning one params entry per column of the chunk.
 
     Args:
-        cols: Asset labels for this chunk.
+        cols: Asset labels for this chunk. Used only to label the fit in logs --
+            the results are addressed by position, not by name.
         y_weighted_chunk: (n, len(cols)) already time-weighted asset columns.
         xw: (n, n_factors) time-weighted factor matrix (shared, read-only).
         sqrt_weights: (n,) sqrt of exponential weights (shared, read-only).
         min_timestamps: Minimum non-NaN observations to attempt a fit.
+        complete_rows: (n,) rows on which every factor is finite (shared,
+            read-only). ANDed with each asset's own finite mask, so a date
+            missing any factor is excluded for every asset -- listwise deletion.
 
     Returns:
-        List of (col, params) where params are the factor betas (constant
-        dropped), or None if the asset has too few observations or the fit
-        raises a linear-algebra/zero-division error.
+        List positionally aligned with ``cols``: each entry is that asset's
+        factor betas (constant dropped), or None if the asset has too few
+        observations or the fit raises a linear-algebra/zero-division error.
+        Positional rather than keyed by label, since asset names are not
+        guaranteed unique and a duplicate would make one asset unaddressable.
     """
-    out: List[Tuple[str, Optional[NDArray[np.floating]]]] = []
+    out: List[Optional[NDArray[np.floating]]] = []
     for j, col in enumerate(cols):
         yv = y_weighted_chunk[:, j]
+        # Weight first, then mask -- the same order as the serial path, which is
+        # what keeps the two bit-identical (asserted by the equivalence tests).
         mask = np.isfinite(yv)  # drops NaN and +/-inf
+        mask &= complete_rows
         if np.count_nonzero(mask) < min_timestamps:
-            out.append((col, None))
+            out.append(None)
             continue
         y_f = yv[mask]
         # Design = [const, factors]. statsmodels add_constant(prepend=True) puts
@@ -109,9 +123,9 @@ def _fit_asset_chunk(
         try:
             params = fit_huber_rlm_params(y_f, x_c, label=col)
         except (np.linalg.LinAlgError, ZeroDivisionError):
-            out.append((col, None))
+            out.append(None)
             continue
-        out.append((col, params[1:]))  # drop the constant, keep factor betas
+        out.append(params[1:])  # drop the constant, keep factor betas
     return out
 
 
@@ -148,14 +162,17 @@ def compute_betas_fast(
     # cycle; the import runs only in the parent that calls this orchestrator, not
     # in the numpy + numba workers that unpickle _fit_asset_chunk.
     # pylint: disable=import-outside-toplevel
+    import pandas as pd
     from joblib import Parallel, delayed, effective_n_jobs
 
     from vbase_utils.stats.robust_betas import prepare_weighted_regression_inputs
 
-    df_betas, sqrt_weights, x_weighted = prepare_weighted_regression_inputs(
-        df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
+    df_betas, sqrt_weights, x_weighted, complete_rows = (
+        prepare_weighted_regression_inputs(
+            df_asset_rets, df_fact_rets, half_life, lambda_, min_timestamps
+        )
     )
-    if sqrt_weights is None or x_weighted is None:
+    if sqrt_weights is None or x_weighted is None or complete_rows is None:
         return df_betas
 
     xw = np.ascontiguousarray(x_weighted.to_numpy(), dtype=np.float64)
@@ -174,7 +191,14 @@ def compute_betas_fast(
     # that pool -- not this call's argument -- executes the tasks.
     eff_jobs = effective_n_jobs(getattr(parallel, "n_jobs", n_jobs))
     if n_chunks is None:
-        n_chunks = min(n_assets, max(1, 4 * eff_jobs))
+        # Two blocks per worker: enough over-decomposition to even out ragged
+        # per-asset fit costs, without slicing the panel so finely that joblib
+        # dispatch dominates. Dispatch is paid once per task per rebalance date,
+        # so its cost scales with n_chunks * n_dates and is heaviest on narrow
+        # panels. Measured fit-stage seconds at 12 workers (lower is better):
+        #   400 assets: 12 chunks 10.9 | 24 chunks 9.8 | 48 chunks 12.1
+        #   100 assets: 12 chunks  6.1 | 24 chunks 6.2 | 48 chunks  8.5
+        n_chunks = min(n_assets, max(1, 2 * eff_jobs))
     idx_chunks = [ix for ix in np.array_split(np.arange(n_assets), n_chunks) if len(ix)]
 
     tasks = (
@@ -184,6 +208,7 @@ def compute_betas_fast(
             xw,
             sqrt_weights,
             min_timestamps,
+            complete_rows,
         )
         for ix in idx_chunks
     )
@@ -197,9 +222,20 @@ def compute_betas_fast(
     else:
         results = parallel(tasks)
 
-    for chunk in results:
-        for col, params in chunk:
+    # Collect into a numpy buffer and build the frame once. Per-asset column
+    # assignment into a DataFrame costs a pandas block insert each time, which
+    # scales with the asset count and runs entirely in the parent; at 100 assets
+    # it accounts for ~12% of total wall clock. The buffer starts as the all-NaN
+    # frame's values, so assets that were skipped or failed to fit stay NaN.
+    # Results are written by position, taken from the same index arrays the
+    # chunks were built from. A {name: position} lookup collapses duplicate asset
+    # names -- only the last is addressable -- so with a repeated column one
+    # asset's betas landed in the other's slot and its own stayed NaN, while the
+    # serial path (which indexes by position already) returned both correctly.
+    out = df_betas.to_numpy(dtype=np.float64, copy=True)
+    for ix, chunk in zip(idx_chunks, results):
+        for pos, params in zip(ix, chunk):
             if params is not None:
-                df_betas[col] = params
+                out[:, pos] = params
 
-    return df_betas
+    return pd.DataFrame(out, index=df_betas.index, columns=df_betas.columns)
