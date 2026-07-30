@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
+from vbase_utils.stats._fast_betas import compute_betas_fast
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
+from vbase_utils.stats.robust_betas import robust_betas
 
 
 def _make_returns(
@@ -51,14 +53,16 @@ def _make_returns(
 
 
 def _assert_equiv(parallel: dict, serial: dict) -> None:
-    """Assert parallel and serial result dicts match (exact, atol=1e-6 fallback)."""
+    """Assert parallel and serial result dicts match bit for bit.
+
+    Exact equality holds because both paths pin BLAS to a single thread, so the
+    LAPACK reduction order inside the IRLS loop is the same in the parent as in
+    the workers. Without that pinning the two differ at ~1e-14 and the result
+    also depends on the machine's ambient thread count, so this assertion is the
+    regression gate for the pinning.
+    """
     for key in ("df_betas", "df_asset_resids"):
-        try:
-            assert_frame_equal(parallel[key], serial[key], check_exact=True)
-        except AssertionError:
-            # Fall back to a tight tolerance if exact equality is flaky across
-            # process boundaries; still a strong correctness gate.
-            assert_frame_equal(parallel[key], serial[key], rtol=0, atol=1e-6)
+        assert_frame_equal(parallel[key], serial[key], check_exact=True)
 
 
 class TestPitParallelEquivalence(unittest.TestCase):
@@ -101,6 +105,37 @@ class TestPitParallelEquivalence(unittest.TestCase):
         parallel = pit_robust_betas(**common, parallel=True)
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
+
+    def test_two_factor_with_holes(self):
+        """Panel with deleted rows: parallel == serial, bit for bit.
+
+        Complete-case deletion is applied in both fit paths, so this is the gate
+        on their agreeing about which rows a window admits. Both must weight the
+        full window and then mask; pre-filtering rows in either path would change
+        the multiply order and break exact equality.
+        """
+        df_asset, df_fact = _make_returns(
+            n=120,
+            betas={"A": [0.5, -0.3], "B": [1.1, 0.4]},
+            factors=["F1", "F2"],
+            seed=11,
+        )
+        # F2 keeps a different calendar: scattered missing prints, plus a late
+        # start so the leading windows are missing the column entirely.
+        df_fact.iloc[:25, 1] = np.nan
+        df_fact.iloc[[40, 41, 77, 98], 1] = np.nan
+        common = {
+            "df_asset_rets": df_asset,
+            "df_fact_rets": df_fact,
+            "half_life": 60.0,
+            "min_timestamps": 20,
+            "rebalance_time_index": df_asset.index,
+        }
+        parallel = pit_robust_betas(**common, parallel=True)
+        serial = pit_robust_betas(**common, parallel=False)
+        _assert_equiv(parallel, serial)
+        # Guard against the test passing because nothing was ever fit.
+        self.assertGreater(parallel["df_betas"].notna().to_numpy().sum(), 0)
 
     def test_rebalance_subset(self):
         """A rebalance_time_index subset: parallel == serial."""
@@ -173,6 +208,36 @@ class TestPitParallelEquivalence(unittest.TestCase):
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
         self.assertTrue(parallel["df_betas"]["DEAD"].isna().all())
+
+    def test_duplicate_asset_names_agree_across_paths(self):
+        """Repeated asset names must not misroute betas in the parallel path.
+
+        The parallel collector used a {name: position} map, which keeps only the
+        last occurrence of a duplicate: one asset's betas were written into the
+        other's slot and its own column stayed NaN, while the serial path -- which
+        indexes by position already -- returned both. Fits go straight through
+        compute_betas_fast here, since pit_robust_betas rejects duplicate names
+        before reaching either path.
+        """
+        df_asset, df_fact = _make_returns(
+            n=80,
+            betas={"A": [2.0], "B": [-1.0]},
+            factors=["FACTOR"],
+            seed=17,
+        )
+        df_asset.columns = ["DUP", "DUP"]
+
+        serial = robust_betas(df_asset, df_fact, half_life=30.0, min_timestamps=20)
+        parallel = compute_betas_fast(
+            df_asset, df_fact, half_life=30.0, min_timestamps=20, n_jobs=2
+        )
+
+        assert_frame_equal(parallel, serial, check_exact=True)
+        # Both assets are estimated, at their own distinct betas.
+        self.assertFalse(parallel.isna().any().any())
+        np.testing.assert_allclose(
+            np.sort(parallel.to_numpy().ravel()), [-1.0, 2.0], atol=0.05
+        )
 
     def test_insufficient_timestamps(self):
         """Fewer than min_timestamps rows: all-NaN betas, no sim run, equal paths."""
