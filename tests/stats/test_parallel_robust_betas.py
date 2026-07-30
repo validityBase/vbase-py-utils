@@ -5,16 +5,16 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as real_sm
 
 from tests.stats._robust_betas_fixtures import (
     STD_ASSET_RETS,
     STD_FACT_RETS,
+    make_fit_first_call_error_side_effect,
     make_multi_asset_ret_frames,
     make_multi_factor_ret_frames,
-    make_rlm_first_call_error_side_effect,
     make_single_asset_ret_frames,
 )
+from vbase_utils.stats._huber_rlm import fit_huber_rlm_params as real_fit
 from vbase_utils.stats.parallel_robust_betas import parallel_robust_betas
 from vbase_utils.stats.robust_betas import robust_betas
 
@@ -103,7 +103,7 @@ class TestParallelRobustBetas(unittest.TestCase):
         _assert_parallel_matches_serial(df_asset_rets, df_fact_rets, half_life=30)
 
     def test_rlm_fit_error_returns_nan_for_affected_asset(self):
-        """When RLM.fit() raises for one asset, parallel_robust_betas does not
+        """When the fit raises for one asset, parallel_robust_betas does not
         raise and that asset's betas are NaN (parity with serial path).
 
         Runs with n_jobs=1 so joblib executes in-process and the patch applies.
@@ -113,8 +113,8 @@ class TestParallelRobustBetas(unittest.TestCase):
         )
 
         with patch(
-            "vbase_utils.stats.parallel_robust_betas.sm.RLM",
-            side_effect=make_rlm_first_call_error_side_effect(real_sm.RLM),
+            "vbase_utils.stats._fast_betas.fit_huber_rlm_params",
+            side_effect=make_fit_first_call_error_side_effect(real_fit),
         ):
             beta_matrix = parallel_robust_betas(
                 df_asset_rets, df_fact_rets, half_life=30, n_jobs=1

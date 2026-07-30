@@ -410,6 +410,101 @@ class TestSimMultiIndex(unittest.TestCase):
         self.assertEqual(cols_seen[2], ["always_present", "sparse_col"])
         self.assertEqual(cols_seen[3], ["always_present", "sparse_col"])
 
+    def test_column_drop_matches_dropna_on_every_date(self):
+        """The precomputed column drop agrees with dropna() at every timestamp.
+
+        The live-column decision is made from per-column first-valid dates
+        rather than by rescanning the masked window, so it is checked directly
+        against the operation it replaces, including a column that never holds
+        a value and one that has data early and NaN afterwards.
+        """
+        n_sym = len(self.symbols)
+        n_dates = len(self.dates)
+        df = pd.DataFrame(
+            {
+                "always": np.arange(len(self.panel), dtype=float),
+                # Never valid anywhere in the panel.
+                "never": np.full(len(self.panel), np.nan),
+                # Valid only on the first date, NaN from then on.
+                "early_only": [1.0] * n_sym + [np.nan] * (n_sym * (n_dates - 1)),
+                # Valid only from the third date onward.
+                "late": [np.nan] * (n_sym * 2) + [1.0] * (n_sym * (n_dates - 2)),
+            },
+            index=self.panel.index,
+        )
+        seen: list[list[str]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(sorted(data["panel"].columns.tolist()))
+            return {}
+
+        sim({"panel": df}, callback, self.dates)
+
+        dates_level = df.index.get_level_values("date")
+        expected = [
+            sorted(df[dates_level <= t].dropna(axis=1, how="all").columns.tolist())
+            for t in self.dates
+        ]
+        self.assertEqual(seen, expected)
+        # "never" is absent throughout; "early_only" survives once seen.
+        self.assertNotIn("never", seen[-1])
+        self.assertIn("early_only", seen[-1])
+
+    def test_column_drop_handles_tz_aware_index(self):
+        """A tz-aware date key must not lose its zone in the first-valid dates.
+
+        The first-valid dates are compared against the loop timestamp, so a
+        tz-naive buffer would raise "Cannot compare tz-naive and tz-aware"
+        rather than answering.
+        """
+        dates = pd.date_range("2023-01-01", periods=4, freq="W", tz="America/New_York")
+        mi = pd.MultiIndex.from_product([dates, self.symbols], names=["date", "symbol"])
+        n_sym = len(self.symbols)
+        df = pd.DataFrame(
+            {
+                "always": np.arange(len(mi), dtype=float),
+                "late": [np.nan] * (n_sym * 2) + [1.0] * (n_sym * 2),
+            },
+            index=mi,
+        )
+        seen: list[list[str]] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(sorted(data["panel"].columns.tolist()))
+            return {}
+
+        sim({"panel": df}, callback, dates)
+
+        self.assertEqual(seen[0], ["always"])
+        self.assertEqual(seen[-1], ["always", "late"])
+
+    def test_column_drop_survives_duplicate_column_names(self):
+        """Duplicate column names are selected positionally, not by label."""
+        n_sym = len(self.symbols)
+        n_dates = len(self.dates)
+        df = pd.DataFrame(
+            np.column_stack(
+                [
+                    np.arange(len(self.panel), dtype=float),
+                    np.full(len(self.panel), np.nan),
+                    np.array([np.nan] * (n_sym * 2) + [1.0] * (n_sym * (n_dates - 2))),
+                ]
+            ),
+            index=self.panel.index,
+            columns=["dup", "dup", "other"],
+        )
+        seen: list[int] = []
+
+        def callback(data: Dict[str, pd.DataFrame | pd.Series]) -> dict:
+            seen.append(data["panel"].shape[1])
+            return {}
+
+        sim({"panel": df}, callback, self.dates)
+
+        # First dates: only the first "dup" is live. Later: "other" joins it.
+        self.assertEqual(seen[0], 1)
+        self.assertEqual(seen[-1], 2)
+
     def test_multiindex_empty_callback_result(self):
         """A callback that always returns {} leaves the sim() result empty."""
 
@@ -446,6 +541,126 @@ class TestSimMultiIndex(unittest.TestCase):
         )
         # market[i] == i (0-based) — each step exposes one more market observation.
         self.assertEqual(market_vals, list(range(len(self.dates))))
+
+    def test_multiindex_result_accumulation_panel(self):
+        """A MultiIndex-indexed DataFrame result accumulates instead of raising.
+
+        keys= adds one index level, so the concatenated index carries
+        1 + result.index.nlevels levels. A fixed two-element names= fitted only
+        a single-level result and rejected the panel-shaped result that a panel
+        input invites, which is the natural thing for such a callback to return.
+        """
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            panel = data["panel"]
+            t = panel.index.get_level_values("date").max()
+            # Returned as-is: the (date, symbol) index is left intact.
+            return {"xs": panel[panel.index.get_level_values("date") == t]}
+
+        result = sim({"panel": self.panel}, callback, self.dates)
+
+        out = result["xs"]
+        # One added level on top of the result's own (date, symbol), whose
+        # names are carried through so the levels stay addressable by name.
+        self.assertEqual(out.index.nlevels, 3)
+        self.assertEqual(list(out.index.names), ["t", "date", "symbol"])
+        # Every timestamp contributed its full cross-section.
+        self.assertEqual(len(out), len(self.dates) * len(self.symbols))
+        self.assertEqual(
+            list(out.index.get_level_values("t").unique()), list(self.dates)
+        )
+
+    def test_flat_result_keeps_two_levels(self):
+        """A single-level result still yields two levels, keeping its own name.
+
+        Guards the case that already worked against the names= change: the
+        level count is unchanged, and the result's index name is carried
+        through rather than blanked to None.
+        """
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            panel = data["panel"]
+            t = panel.index.get_level_values("date").max()
+            xs = panel[panel.index.get_level_values("date") == t].copy()
+            xs.index = xs.index.get_level_values("symbol")
+            return {"xs": xs}
+
+        out = sim({"panel": self.panel}, callback, self.dates)["xs"]
+
+        self.assertEqual(out.index.nlevels, 2)
+        self.assertEqual(list(out.index.names), ["t", "symbol"])
+
+    def test_unnamed_flat_result_index_names_unchanged(self):
+        """An unnamed single-level result still yields exactly ["t", None]."""
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            panel = data["panel"]
+            t = panel.index.get_level_values("date").max()
+            xs = panel[panel.index.get_level_values("date") == t].copy()
+            xs.index = pd.Index(xs.index.get_level_values("symbol").tolist())
+            return {"xs": xs}
+
+        out = sim({"panel": self.panel}, callback, self.dates)["xs"]
+
+        self.assertEqual(list(out.index.names), ["t", None])
+
+    def test_multiindex_window_result_keeps_as_of_distinct(self):
+        """ "t" is retained even when the result carries its own date level.
+
+        For a callback returning a window rather than a single cross-section,
+        "t" is the as-of date and the inner level is the observation date. They
+        differ, and suppressing "t" as redundant would collide the rows that
+        different as-of dates contribute for the same (date, symbol).
+        """
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.DataFrame]:
+            panel = data["panel"]
+            # Last two dates available, so results overlap across timestamps.
+            keep = panel.index.get_level_values("date").unique()[-2:]
+            return {"win": panel[panel.index.get_level_values("date").isin(keep)]}
+
+        out = sim({"panel": self.panel}, callback, self.dates)["win"]
+
+        as_of = out.index.get_level_values("t")
+        observed = out.index.get_level_values("date")
+        # The two date levels are not interchangeable.
+        self.assertTrue((as_of != observed).any())
+        # The same (date, symbol) is reported under more than one as-of date, so
+        # dropping "t" would produce duplicate index entries.
+        self.assertTrue(out.index.droplevel("t").duplicated().any())
+
+    def test_multiindex_unsorted_panel_matches_sorted(self):
+        """An unsorted date level takes the boolean path and agrees with the slice.
+
+        The fast path slices positionally after a binary search, which is only
+        valid when the date key is sorted. Sortedness is not guaranteed, so the
+        boolean fallback must stay equivalent.
+        """
+        shuffled = self.panel.iloc[
+            np.random.default_rng(0).permutation(len(self.panel))
+        ]
+        self.assertFalse(
+            shuffled.index.get_level_values("date").is_monotonic_increasing
+        )
+
+        def callback(
+            data: Dict[str, pd.DataFrame | pd.Series],
+        ) -> Dict[str, pd.Series]:
+            panel = data["panel"]
+            return {"agg": pd.Series({"total": float(panel["feature"].sum())})}
+
+        sorted_out = sim({"panel": self.panel}, callback, self.dates)["agg"]
+        shuffled_out = sim({"panel": shuffled}, callback, self.dates)["agg"]
+
+        pd.testing.assert_frame_equal(sorted_out, shuffled_out)
 
 
 if __name__ == "__main__":
