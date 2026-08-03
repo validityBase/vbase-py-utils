@@ -64,6 +64,7 @@ def pit_robust_betas(
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
     n_jobs: int = -1,
+    return_hedge_rets_by_fact: bool = True,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
 
@@ -93,6 +94,13 @@ def pit_robust_betas(
             -1 (use all available cores). Peak memory scales roughly linearly with the
             worker count, so on wide panels lower ``n_jobs`` (e.g. 6-8) to cap the
             memory footprint at some throughput cost.
+        return_hedge_rets_by_fact: Whether to include 'df_hedge_rets_by_fact' in the
+            result. Defaults to True. It is the largest frame this function builds, at
+            (n_timestamps * n_factors, n_assets), and it cannot be skipped outright --
+            'df_hedge_rets' is its per-timestamp sum -- but setting this False frees it
+            as soon as that sum is taken, before the residual arithmetic allocates,
+            rather than holding it alive through the return. Callers that want only
+            betas and residuals should pass False.
 
     Missing factor data is handled by listwise deletion, matching R's ``lm()``
     under ``na.omit``. A date on which any factor return is non-finite is dropped
@@ -108,7 +116,8 @@ def pit_robust_betas(
         - 'df_betas': DataFrame with MultiIndex (timestamp, factor) and shape
           (n_timestamps * n_factors, n_assets) containing the computed betas at each timestamp
         - 'df_hedge_rets_by_fact': DataFrame with MultiIndex (timestamp, factor) and shape
-          (n_timestamps * n_factors, n_assets) containing the hedge returns by factor
+          (n_timestamps * n_factors, n_assets) containing the hedge returns by factor.
+          Omitted when ``return_hedge_rets_by_fact`` is False.
         - 'df_hedge_rets': DataFrame of shape (n_timestamps, n_assets) containing
           the total hedge returns at each timestamp
         - 'df_asset_resids': DataFrame of shape (n_timestamps, n_assets) containing
@@ -326,10 +335,14 @@ def pit_robust_betas(
     # parallel_robust_betas (BLAS pinned per worker).
     #
     # On the choice of parallel axis: fanning out over dates instead (panel
-    # shared read-only, one task per block of dates) measures 2-3x faster at
-    # T=500-2000 x N=100 on 12 cores for the same peak memory, since it pays one
-    # barrier rather than one per rebalance date. The asset-level axis is used
-    # here because the streaming sink and pool reuse are built around it.
+    # shared read-only, one task per block of dates) pays one barrier rather than
+    # one per rebalance date, so it wins where a date is too narrow to amortize
+    # its own fan-out -- 2.35x at N=100, 1.64x at N=200, 1.29x at N=400. The
+    # margin collapses as panels widen: at the production shape (T=1393,
+    # N=21000, K=1, 6 jobs) it measures 1.14x for 11% more peak PSS. The
+    # asset-level axis is kept because that is not worth replacing sim(), which
+    # owns the masking and column-dropping rules the date path would have to
+    # re-derive.
     if len(df_asset_rets.index) >= min_timestamps:
         sim_args = (
             {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
@@ -340,10 +353,24 @@ def pit_robust_betas(
             # One worker pool for the whole date loop: keeps workers (and their
             # numpy import) warm across every rebalance date instead of paying
             # pool acquisition per date.
+            # max_nbytes=None disables joblib's automatic memmapping of large
+            # task arguments. By default any array over 1 MB is dumped to a file
+            # under /dev/shm (or $TMPDIR), and those files are reclaimed only
+            # when the pool exits -- which for this pool is the end of the whole
+            # date loop. Each date ships a (window x n_assets) slice, so the
+            # spool grows as sum over dates of t*n_assets*8 rather than staying
+            # at the few slices actually in flight: measured at n_assets=21000,
+            # 6 jobs, it tracked the cumulative shipped bytes almost exactly
+            # (6.9 GB spooled by date 237) and reached zero only at pool exit.
+            # Over a full daily history that total is n_assets*8*T^2/2 -- ~163 GB
+            # at T=1393 n_assets=21000 -- which exhausts /dev/shm partway through
+            # the run and fails the build with ENOSPC. Pickling the slices inline
+            # instead frees each with its task and holds the spool at zero.
             with Parallel(
                 n_jobs=n_jobs,
                 initializer=_init_worker,
                 inner_max_num_threads=1,
+                max_nbytes=None,
             ) as par:
                 pool["parallel"] = par
                 # write_betas streams each date straight into betas_buf; sim()
@@ -424,6 +451,15 @@ def pit_robust_betas(
     # zero, which is the only distinction that matters here.
     df_hedge_rets = df_hedge_rets_by_fact.groupby("timestamp").sum(min_count=1)
 
+    # The by-factor panel is the largest frame built here, and the sum above is
+    # the last thing that needs it. A caller that did not ask for it has it
+    # dropped now, before the residual arithmetic below allocates, rather than
+    # kept alive to the return and discarded there.
+    results: Dict[str, pd.DataFrame] = {"df_betas": df_betas}
+    if return_hedge_rets_by_fact:
+        results["df_hedge_rets_by_fact"] = df_hedge_rets_by_fact
+    del df_hedge_rets_by_fact
+
     # Calculate the residuals.
     df_asset_resids = df_asset_rets + df_hedge_rets
     # Set the index names.
@@ -431,9 +467,6 @@ def pit_robust_betas(
     if df_asset_resids.index.name is None:
         df_asset_resids.index.name = "timestamp"
 
-    return {
-        "df_betas": df_betas,
-        "df_hedge_rets_by_fact": df_hedge_rets_by_fact,
-        "df_hedge_rets": df_hedge_rets,
-        "df_asset_resids": df_asset_resids,
-    }
+    results["df_hedge_rets"] = df_hedge_rets
+    results["df_asset_resids"] = df_asset_resids
+    return results
