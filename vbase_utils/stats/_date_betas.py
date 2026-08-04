@@ -9,7 +9,7 @@ list of ints, and the whole run pays one barrier.
 
 That trade is worth 2.35x at N=100 and 1.14x at N=21000 -- the win is the barrier
 count, and a wide date amortizes its own fan-out -- for ~11% more peak memory at
-production width. See ``pit-betas-parallelism.md`` and
+production width. See ``internal/specs/pit-betas-parallelism.md`` and
 ``internal/specs/pit-betas-date-axis-plan.md``.
 
 **This module owns no rules of its own.** Every window-level decision the serial

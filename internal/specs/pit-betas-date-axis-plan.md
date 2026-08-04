@@ -11,7 +11,7 @@ being written against it rather than from it.
 ## 0. Read first: this is chosen against the measured trade
 
 Measured at the production shape (T=1393, N=21000, K=1, 6 jobs), both variants on
-current code -- see [pit-betas-parallelism.md](../../pit-betas-parallelism.md):
+current code -- see [pit-betas-parallelism.md](pit-betas-parallelism.md):
 
 | variant | wall s | peak PSS MB |
 |---|---|---|
