@@ -22,21 +22,21 @@ jobs:
         uses: validityBase/vbase-github-actions/.github/actions/setup-python-deps@v1
         with:
           requirements-files: |
-            requirements/lock/tools.txt
+            requirements/tools.txt
           python-version: "3.11"
           require-hashes: true
 
       - name: Verify generated lock files are current
         run: |
-          pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/lock/tools.txt requirements/src/tools.in
-          pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/lock/dev.txt requirements/src/dev.in
-          git diff --exit-code -- requirements/lock/dev.txt requirements/lock/tools.txt
+          pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/tools.txt requirements/tools.in
+          pip-compile --strip-extras --no-annotate --allow-unsafe --generate-hashes -o requirements/dev.txt requirements/dev.in
+          git diff --exit-code -- requirements/dev.txt requirements/tools.txt
 
       - name: Install development dependencies
         uses: validityBase/vbase-github-actions/.github/actions/setup-python-deps@v1
         with:
           requirements-files: |
-            requirements/lock/dev.txt
+            requirements/dev.txt
           python-version: "3.11"
           require-hashes: true
 
