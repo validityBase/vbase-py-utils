@@ -788,6 +788,10 @@ class TestPitRobustBetasWorkerPool(_PanelFixture):
         run, so the default 1 MB threshold accumulates one (window x n_assets)
         slice per rebalance date -- n_assets*8*T^2/2 over a full history, which
         exhausts the filesystem and fails the build with ENOSPC.
+
+        The axis is named explicitly: this pool belongs to the asset axis, which
+        ships a panel slice per task. The date axis holds its own pool in
+        _date_betas and ships a list of ints, so it never reaches this code.
         """
         captured = {}
         real_parallel = pit_robust_betas_module.Parallel
@@ -803,6 +807,7 @@ class TestPitRobustBetasWorkerPool(_PanelFixture):
                 self.df_fact_rets,
                 half_life=30,
                 parallel=True,
+                parallel_axis="asset",
                 n_jobs=2,
             )
         finally:

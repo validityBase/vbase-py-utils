@@ -130,6 +130,46 @@ def check_min_timestamps_series(
     return empty_filtered, empty_mask
 
 
+def resolve_decay_lambda(
+    half_life: float | None = None,
+    lambda_: float | None = None,
+) -> float:
+    """Validate the decay controls and return the decay factor they specify.
+
+    Either half_life or lambda_ must be provided. If both are, lambda_ is used.
+
+    Split out of :func:`exponential_weights` so that a caller which builds the
+    weights itself -- the date axis slices one panel-length power series rather
+    than rebuilding the weights per window -- still validates its inputs by the
+    same rules. Deriving the factor in two places let a non-positive half_life
+    through as ``exp(log(0.5)/half_life)`` garbage instead of a ValueError.
+
+    Args:
+        half_life: Half-life in time units (e.g., days). Must be positive.
+        lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
+
+    Returns:
+        The decay factor.
+
+    Raises:
+        ValueError: If neither half_life nor lambda_ is provided.
+        ValueError: If half_life is not positive or lambda_ is not between 0 and 1.
+    """
+    # Ordered so the raised message is the same one this validation has always
+    # produced: half_life is judged before lambda_, and "neither was provided"
+    # before either. The checks are nested rather than chained only so the type
+    # of half_life is pinned on the derivation below.
+    if half_life is not None and half_life <= 0:
+        raise ValueError("half_life must be positive.")
+    if lambda_ is not None:
+        if not 0 < lambda_ < 1:
+            raise ValueError("lambda_ must be between 0 and 1.")
+        return float(lambda_)
+    if half_life is None:
+        raise ValueError("Either half_life or lambda_ must be provided.")
+    return float(np.exp(np.log(0.5) / half_life))
+
+
 def exponential_weights(
     n: int,
     half_life: float | None = None,
@@ -152,15 +192,7 @@ def exponential_weights(
         ValueError: If neither half_life nor lambda_ is provided.
         ValueError: If half_life is not positive or lambda_ is not between 0 and 1.
     """
-    if half_life is None and lambda_ is None:
-        raise ValueError("Either half_life or lambda_ must be provided.")
-    if half_life is not None and half_life <= 0:
-        raise ValueError("half_life must be positive.")
-    if lambda_ is not None and not 0 < lambda_ < 1:
-        raise ValueError("lambda_ must be between 0 and 1.")
-
-    if lambda_ is None:
-        lambda_ = np.exp(np.log(0.5) / half_life)
+    lambda_ = resolve_decay_lambda(half_life, lambda_)
 
     weights: np.ndarray = lambda_ ** np.arange(n - 1, -1, -1)
     return weights / np.sum(weights)  # normalize

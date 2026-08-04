@@ -1,7 +1,7 @@
 """Point-in-time robust regression module for calculating hedge ratios and residuals."""
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -9,12 +9,16 @@ from joblib import Parallel
 from threadpoolctl import threadpool_limits
 
 from vbase_utils.sim import sim
+from vbase_utils.stats._date_betas import fill_betas_buf_by_date
 from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
 from vbase_utils.stats.robust_betas import (
     NEAR_ZERO_VARIANCE_THRESHOLD,
     finite_column_variances,
     robust_betas,
 )
+
+# Accepted values for the parallel_axis argument.
+_PARALLEL_AXES = ("date", "asset")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -60,10 +64,12 @@ def pit_robust_betas(
     lambda_: Optional[float] = None,
     min_timestamps: int = 10,
     parallel: bool = False,
+    parallel_axis: Literal["date", "asset"] = "date",
     fill_missing_betas: bool = False,
     rebalance_time_index: Optional[pd.DatetimeIndex] = None,
     progress: bool = False,
     n_jobs: int = -1,
+    blocks_per_worker: int = 4,
     return_hedge_rets_by_fact: bool = True,
 ) -> Dict[str, pd.DataFrame]:
     """Calculate point-in-time robust betas and residuals for time series regressions.
@@ -80,13 +86,32 @@ def pit_robust_betas(
         half_life: Half-life in time units (e.g., days). Must be positive.
         lambda_: Decay factor (e.g., 0.985). Must be between 0 and 1.
         min_timestamps: Minimum number of timestamps required for regression. Defaults to 10.
-        parallel: If True, fan the per-asset Huber-RLM fits out across processes in
-            chunked asset blocks (numpy + numba workers); otherwise run them
-            serially. Both paths pin BLAS to a single thread, which makes them
-            bit-identical to each other and reproducible regardless of the
-            machine's ambient BLAS thread count. Defaults to False.
+        parallel: If True, fan the Huber-RLM fits out across processes; otherwise
+            run them serially. Every path pins BLAS to a single thread, which
+            makes them bit-identical to each other and reproducible regardless of
+            the machine's ambient BLAS thread count. Defaults to False.
+        parallel_axis: Which axis to parallelize over when ``parallel=True``.
+            Ignored when ``parallel=False``, which always runs the serial
+            ``robust_betas`` path.
+
+            - ``"date"`` (default): one task per block of rebalance dates. The
+              panel is written to disk once and memmapped read-only into every
+              worker, so it costs the machine one copy however many workers read
+              it, the per-task payload is a list of ints, and the run pays one
+              fan-out rather than one per date.
+            - ``"asset"``: one task per block of assets *within* each rebalance
+              date, so a fan-out and a barrier are paid per date.
+
+            The date axis wins where a date is too narrow to amortize its own
+            fan-out -- measured 2.35x at 100 assets, 1.64x at 200, 1.29x at 400 --
+            and the margin collapses as panels widen, to 1.14x at the production
+            shape (T=1393, 21000 assets, 1 factor, 6 jobs). At that width it
+            also costs ~11% more peak memory, so a caller optimizing for memory
+            on a very wide panel should pass ``"asset"``.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
-            least one asset has a valid beta. Defaults to False.
+            least one asset has a valid beta. Only assets that have listed as of
+            that date are filled; an asset with no data yet keeps its NaN.
+            Defaults to False.
         rebalance_time_index: Optional DatetimeIndex specifying when to rebalance hedge ratios.
             If not provided, uses all timestamps from df_asset_rets.
         progress: Whether to show a progress bar during simulation. Defaults to False.
@@ -94,6 +119,12 @@ def pit_robust_betas(
             -1 (use all available cores). Peak memory scales roughly linearly with the
             worker count, so on wide panels lower ``n_jobs`` (e.g. 6-8) to cap the
             memory footprint at some throughput cost.
+        blocks_per_worker: Date blocks per worker on the date axis; ignored on the
+            asset axis. Over-decomposition evens out the ragged per-date cost --
+            a late window is far more expensive than an early one -- at the price
+            of more tasks. It also sizes the result payload each task ships back
+            (see ``_date_worker.date_block``), so raising it is a memory decision
+            as well as a scheduling one. Defaults to 4.
         return_hedge_rets_by_fact: Whether to include 'df_hedge_rets_by_fact' in the
             result. Defaults to True. It is the largest frame this function builds, at
             (n_timestamps * n_factors, n_assets), and it cannot be skipped outright --
@@ -128,6 +159,13 @@ def pit_robust_betas(
             or if timestamps don't align.
     """
     # Validate input data
+    # Checked whether or not parallel is set: a misspelled axis is a caller
+    # error either way, and silently falling back to a default would hide it
+    # until someone wondered why the run was not faster.
+    if parallel_axis not in _PARALLEL_AXES:
+        raise ValueError(
+            f"parallel_axis must be one of {_PARALLEL_AXES}, got {parallel_axis!r}"
+        )
     if df_asset_rets.empty or df_fact_rets.empty:
         raise ValueError("Input DataFrames cannot be empty")
     # Ensure indices are DatetimeIndex
@@ -329,65 +367,88 @@ def pit_robust_betas(
         )
         betas_buf[np.ix_(rows, cols)] = beta_matrix.to_numpy(dtype=float)
 
-    # Run simulation only if there is sufficient data to produce any betas.
-    # The rebalance-date loop runs in sim(); when parallel=True the per-date
-    # callback fans the per-asset fits out across processes via
-    # parallel_robust_betas (BLAS pinned per worker).
+    # Run the fits only if there is sufficient data to produce any betas.
     #
-    # On the choice of parallel axis: fanning out over dates instead (panel
-    # shared read-only, one task per block of dates) pays one barrier rather than
-    # one per rebalance date, so it wins where a date is too narrow to amortize
-    # its own fan-out -- 2.35x at N=100, 1.64x at N=200, 1.29x at N=400. The
-    # margin collapses as panels widen: at the production shape (T=1393,
-    # N=21000, K=1, 6 jobs) it measures 1.14x for 11% more peak PSS. The
-    # asset-level axis is kept because that is not worth replacing sim(), which
-    # owns the masking and column-dropping rules the date path would have to
-    # re-derive.
+    # Three paths fill the same buffer and must produce the same bytes:
+    #
+    # * parallel=False -- the rebalance-date loop runs in sim(), which owns the
+    #   point-in-time masking and the all-NaN column drop, and robust_betas fits
+    #   each window serially. This is the reference the other two are tested
+    #   against, so it deliberately shares no fit code with them.
+    # * parallel=True, parallel_axis="asset" -- same sim() loop, but the
+    #   per-date callback fans the per-asset fits out across chunked asset
+    #   blocks (BLAS pinned per worker).
+    # * parallel=True, parallel_axis="date" -- sim() is replaced outright. The
+    #   window gates it and robust_betas derive per date are answered once, up
+    #   front, from cumulative row-level facts, and the dates themselves are the
+    #   unit of work. See _date_betas, which documents each gate against the
+    #   serial code it reproduces.
+    #
+    # Only the fit stage differs. Everything below this block -- the frame
+    # construction, the reindex, the per-factor ffill and shift, the hedge
+    # arithmetic -- is shared, so a change there cannot diverge across axes.
     if len(df_asset_rets.index) >= min_timestamps:
-        sim_args = (
-            {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
-            regression_callback,
-            rebalance_time_index,
-        )
-        if parallel:
-            # One worker pool for the whole date loop: keeps workers (and their
-            # numpy import) warm across every rebalance date instead of paying
-            # pool acquisition per date.
-            # max_nbytes=None disables joblib's automatic memmapping of large
-            # task arguments. By default any array over 1 MB is dumped to a file
-            # under /dev/shm (or $TMPDIR), and those files are reclaimed only
-            # when the pool exits -- which for this pool is the end of the whole
-            # date loop. Each date ships a (window x n_assets) slice, so the
-            # spool grows as sum over dates of t*n_assets*8 rather than staying
-            # at the few slices actually in flight: measured at n_assets=21000,
-            # 6 jobs, it tracked the cumulative shipped bytes almost exactly
-            # (6.9 GB spooled by date 237) and reached zero only at pool exit.
-            # Over a full daily history that total is n_assets*8*T^2/2 -- ~163 GB
-            # at T=1393 n_assets=21000 -- which exhausts /dev/shm partway through
-            # the run and fails the build with ENOSPC. Pickling the slices inline
-            # instead frees each with its task and holds the spool at zero.
-            with Parallel(
+        if parallel and parallel_axis == "date":
+            fill_betas_buf_by_date(
+                betas_buf,
+                df_asset_rets,
+                df_fact_rets,
+                half_life=half_life,
+                lambda_=lambda_,
+                min_timestamps=min_timestamps,
+                rebalance_time_index=rebalance_time_index,
+                fill_missing_betas=fill_missing_betas,
                 n_jobs=n_jobs,
-                initializer=_init_worker,
-                inner_max_num_threads=1,
-                max_nbytes=None,
-            ) as par:
-                pool["parallel"] = par
-                # write_betas streams each date straight into betas_buf; sim()
-                # retains nothing, so peak memory does not grow with the number
-                # of rebalance dates.
-                sim(*sim_args, progress=progress, on_result=write_betas)
-            pool["parallel"] = None
+                blocks_per_worker=blocks_per_worker,
+                progress=progress,
+                warn_incomplete_factors=_warn_incomplete_factors,
+            )
         else:
-            # Pin BLAS to one thread for the same reason the workers do. The
-            # designs here are (window x n_factors+1) with a handful of columns,
-            # so a multithreaded LAPACK SVD inside the IRLS loop spends more
-            # time synchronizing threads than solving: pinning measures ~2.4x
-            # faster on this path. It also fixes the reduction order, which is
-            # what makes serial betas reproducible across machines and
-            # bit-identical to the parallel path.
-            with threadpool_limits(limits=1, user_api="blas"):
-                sim(*sim_args, progress=progress, on_result=write_betas)
+            sim_args = (
+                {"df_asset_rets": df_asset_rets, "df_fact_rets": df_fact_rets},
+                regression_callback,
+                rebalance_time_index,
+            )
+            if parallel:
+                # One worker pool for the whole date loop: keeps workers (and
+                # their numpy import) warm across every rebalance date instead of
+                # paying pool acquisition per date.
+                # max_nbytes=None disables joblib's automatic memmapping of large
+                # task arguments. By default any array over 1 MB is dumped to a
+                # file under /dev/shm (or $TMPDIR), and those files are reclaimed
+                # only when the pool exits -- which for this pool is the end of
+                # the whole date loop. Each date ships a (window x n_assets)
+                # slice, so the spool grows as sum over dates of t*n_assets*8
+                # rather than staying at the few slices actually in flight:
+                # measured at n_assets=21000, 6 jobs, it tracked the cumulative
+                # shipped bytes almost exactly (6.9 GB spooled by date 237) and
+                # reached zero only at pool exit. Over a full daily history that
+                # total is n_assets*8*T^2/2 -- ~163 GB at T=1393 n_assets=21000 --
+                # which exhausts /dev/shm partway through the run and fails the
+                # build with ENOSPC. Pickling the slices inline instead frees
+                # each with its task and holds the spool at zero.
+                with Parallel(
+                    n_jobs=n_jobs,
+                    initializer=_init_worker,
+                    inner_max_num_threads=1,
+                    max_nbytes=None,
+                ) as par:
+                    pool["parallel"] = par
+                    # write_betas streams each date straight into betas_buf;
+                    # sim() retains nothing, so peak memory does not grow with
+                    # the number of rebalance dates.
+                    sim(*sim_args, progress=progress, on_result=write_betas)
+                pool["parallel"] = None
+            else:
+                # Pin BLAS to one thread for the same reason the workers do. The
+                # designs here are (window x n_factors+1) with a handful of
+                # columns, so a multithreaded LAPACK SVD inside the IRLS loop
+                # spends more time synchronizing threads than solving: pinning
+                # measures ~2.4x faster on this path. It also fixes the reduction
+                # order, which is what makes serial betas reproducible across
+                # machines and bit-identical to the parallel path.
+                with threadpool_limits(limits=1, user_api="blas"):
+                    sim(*sim_args, progress=progress, on_result=write_betas)
 
     # Calculate residuals using matrix operations.
 
