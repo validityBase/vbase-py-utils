@@ -9,9 +9,6 @@ throughout (`scratch/pit_betas_bench/bench_common.py:make_panel` in
 load balance on both axes. Measured on WSL2, 12 cores, 15 GB RAM, joblib 1.5.1.
 Ratios travel between machines; absolute numbers do not.
 
-Related: [pit-betas-date-axis-plan.md](pit-betas-date-axis-plan.md) covers the
-date-axis implementation and the serial rules it has to reproduce.
-
 ## 1. The production shape
 
 The heaviest caller is the `dagster-pipelines-internal` market betas stage
@@ -171,14 +168,50 @@ Two consequences of the default:
 
 * A caller passing `parallel=True` and nothing else runs on the date axis, and at
   production width takes the 11% peak-memory increase with it. The source of that
-  increase has not been diagnosed; the candidates are recorded in
-  [pit-betas-date-axis-plan.md](pit-betas-date-axis-plan.md) §7. A caller
-  optimizing for memory on a very wide panel should pass `parallel_axis="asset"`.
+  increase has not been diagnosed (see below). A caller optimizing for memory on a
+  very wide panel should pass `parallel_axis="asset"`.
 * `dagster-pipelines-internal` reads the axis from `BETAS_PARALLEL_AXIS`, so
   production can revert to the asset axis without a release.
 
 The narrow-panel case is where the date axis pays. At hundreds rather than tens
 of thousands of assets the measured speedup is 1.6-2.4x.
+
+### The 11% peak-memory gap is undiagnosed
+
+2794 MB peak PSS against 2519 MB. Recorded so whoever picks it up does not
+restart the analysis. Candidates, in order of suspicion:
+
+1. **The panel is held twice.** `precompute` takes
+   `np.ascontiguousarray(df_asset_rets.to_numpy())` while the caller's frame is
+   still alive, then spills that copy and re-maps it. Peak inside `precompute`,
+   before the pool starts: caller frame 234 + `a` 234 + `cs_valid` 117 + `valid`
+   29 ~= 614 MB, which is the right order for the 275 MB gap.
+2. `valid` (29 MB) and `cs_valid` (117 MB) are full-size arrays the asset path
+   never builds.
+3. In-flight block results, sized by `blocks_per_worker`.
+
+**Not** a candidate: the `(n_dates * n_facts, n_assets)` betas buffer. It is
+234 MB and is allocated identically on both paths, so it cannot explain a
+difference.
+
+Whoever closes this should add a regression test asserting the date path's peak
+tree PSS is not worse than the asset path's on a small panel, and re-measure at
+production width.
+
+### Reproducing the measurements
+
+```bash
+cd dagster-pipelines-internal/scratch/pit_betas_bench
+
+python3 bench.py --sizes 1393x21000 --K 1 --jobs 6 \
+        --variants asset_par date_par_lean          # production shape
+python3 probe_perdate.py fit --T 1393 --N 21000 --K 1 --jobs 6
+python3 probe_mem.py workers date_par_lean          # per-worker Pss
+```
+
+`bench_common.py:REPO` must point at the checkout under test. `bench.py --check`
+is a narrow equivalence check, not the correctness gate -- that is
+`tests/stats/test_pit_robust_betas_date_axis_equiv.py`.
 
 ### Not evaluated here
 
