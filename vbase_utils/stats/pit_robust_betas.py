@@ -91,7 +91,8 @@ def pit_robust_betas(
             makes them bit-identical to each other and reproducible regardless of
             the machine's ambient BLAS thread count. Defaults to False.
         parallel_axis: Which axis to parallelize over when ``parallel=True``.
-            Ignored when ``parallel=False``, which always runs the serial
+            The value is validated on every call, but only takes effect when
+            ``parallel=True``; ``parallel=False`` always runs the serial
             ``robust_betas`` path.
 
             - ``"date"`` (default): one task per block of rebalance dates. The

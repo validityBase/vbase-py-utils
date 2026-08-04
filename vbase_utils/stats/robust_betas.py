@@ -136,7 +136,9 @@ def resolve_decay_lambda(
 ) -> float:
     """Validate the decay controls and return the decay factor they specify.
 
-    Either half_life or lambda_ must be provided. If both are, lambda_ is used.
+    Either half_life or lambda_ must be provided. If both are, lambda_ supplies
+    the returned factor, but half_life is still range-checked and a non-positive
+    half_life raises even when a valid lambda_ is present.
 
     Split out of :func:`exponential_weights` so that a caller which builds the
     weights itself -- the date axis slices one panel-length power series rather
@@ -177,8 +179,9 @@ def exponential_weights(
 ) -> np.ndarray:
     """Generate exponential decay weights for n time periods.
 
-    Either half_life or lambda_ must be provided.
-    If both are provided, lambda_ is used.
+    Either half_life or lambda_ must be provided. If both are provided, lambda_
+    supplies the decay factor, but half_life is still range-checked and a
+    non-positive half_life raises even when a valid lambda_ is present.
 
     Args:
         n: Number of time periods.
