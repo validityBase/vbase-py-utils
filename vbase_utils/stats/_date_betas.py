@@ -11,6 +11,13 @@ That trade is worth 2.35x at N=100 and 1.14x at N=21000 -- the win is the barrie
 count, and a wide date amortizes its own fan-out -- for ~11% more peak memory at
 production width. See ``internal/specs/pit-betas-parallelism.md``.
 
+The spill lands in :func:`tempfile.mkdtemp`, so it follows ``TMPDIR`` (``TEMP`` or
+``TMP`` on Windows). Point that at a disk-backed directory. A memory-backed one --
+and ``/tmp`` is ``tmpfs`` on many Linux distributions -- makes the spill a memory
+cost rather than a disk one, which defeats the point of spilling and can exhaust
+the filesystem mid-run; a full-width build has already died with ENOSPC after
+filling a 7.9 GB ``/dev/shm`` that way.
+
 **This module owns no rules of its own.** Every window-level decision the serial
 path makes inside :func:`vbase_utils.stats.robust_betas._validate_beta_inputs` is
 answered here, once, in :func:`precompute`, against the same values and with the
@@ -42,58 +49,20 @@ from vbase_utils.stats.robust_betas import (
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-# Filesystem types whose "files" are resident memory rather than disk. Spilling
-# the panel to one of these does not trade memory for disk, it just relabels the
-# memory -- and a full-width betas build has already died with ENOSPC after
-# filling a 7.9 GB /dev/shm this way.
-_MEMORY_BACKED_FSTYPES = frozenset({"tmpfs", "ramfs", "devtmpfs"})
-
-
-def _filesystem_type(path: str) -> Optional[str]:
-    """Filesystem type backing ``path``, or None if it cannot be determined.
-
-    Reads /proc/self/mounts and takes the longest matching mount point, which is
-    the one that actually serves the path. Returns None off Linux or if the
-    mount table is unreadable, in which case the caller skips the check rather
-    than guessing.
-    """
-    try:
-        with open("/proc/self/mounts", "r", encoding="utf-8") as handle:
-            entries = [line.split() for line in handle]
-    except OSError:
-        return None
-    target = os.path.realpath(path)
-    best_len, best_type = -1, None
-    for entry in entries:
-        if len(entry) < 3:
-            continue
-        mount_point, fstype = entry[1], entry[2]
-        if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
-            if len(mount_point) > best_len:
-                best_len, best_type = len(mount_point), fstype
-    return best_type
-
 
 def _check_spill_target(spill_dir: str, n_bytes: int) -> None:
-    """Warn if the spill directory is memory-backed or short on space.
+    """Warn if the spill directory cannot hold the panel.
 
-    Neither condition raises. A memory-backed $TMPDIR makes the spill a memory
-    cost rather than a disk one, which defeats the point of spilling but still
-    computes the right answer; and a free-space estimate is a prediction, not a
-    fact. Both are worth surfacing before the run rather than diagnosing from an
-    ENOSPC traceback 400 dates in.
+    Does not raise: a free-space estimate is a prediction, not a fact, and the
+    run may still fit. It is worth surfacing up front rather than diagnosing
+    from an ENOSPC traceback 400 dates in.
+
+    This also covers the memory-backed case the module docstring warns about
+    without having to identify the filesystem, which has no portable API.
+    ``disk_usage`` on a tmpfs reports the size of the tmpfs, so a spill too
+    large for ``/dev/shm`` -- half of RAM by default -- warns here. A panel that
+    fits does not, and is charged to RAM silently; ``TMPDIR`` is the fix.
     """
-    fstype = _filesystem_type(spill_dir)
-    if fstype in _MEMORY_BACKED_FSTYPES:
-        logger.warning(
-            "The betas panel spill directory %s is on a %s filesystem, which is "
-            "memory rather than disk, so the ~%.0f MB panel is charged to RAM "
-            "and can exhaust the filesystem mid-run. Set TMPDIR to a disk-backed "
-            "directory.",
-            spill_dir,
-            fstype,
-            n_bytes / 1e6,
-        )
     try:
         free = shutil.disk_usage(spill_dir).free
     except OSError:
@@ -101,10 +70,12 @@ def _check_spill_target(spill_dir: str, n_bytes: int) -> None:
     if free < n_bytes:
         logger.warning(
             "The betas panel spill needs ~%.0f MB but %s has %.0f MB free; the "
-            "run is likely to fail with ENOSPC.",
+            "run is likely to fail with ENOSPC. If %s is memory-backed, set "
+            "TMPDIR to a disk-backed directory.",
             n_bytes / 1e6,
             spill_dir,
             free / 1e6,
+            spill_dir,
         )
 
 
