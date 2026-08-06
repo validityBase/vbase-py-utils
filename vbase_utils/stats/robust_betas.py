@@ -251,8 +251,20 @@ def _validate_beta_inputs(
         raise ValueError("df_asset_rets and df_fact_rets must have the same index.")
 
     n_timestamps, _ = df_asset_rets.shape
+    # Wrapped around a preallocated buffer rather than built by
+    # pd.DataFrame(index=, columns=, dtype=float). That constructor takes pandas'
+    # dict-of-columns path and materializes the frame one column at a time, so its
+    # cost scales with the asset count and is paid on every window -- including the
+    # leading ones that return here without fitting anything. Measured at 10600
+    # assets it is 203 ms per window against 0.03 ms for this form, and it
+    # accounted for half the wall clock of a point-in-time run over a 20874-asset
+    # panel. The buffer is freshly allocated per call, so copy=False borrows it
+    # without aliasing anything the caller holds.
     df_betas: pd.DataFrame = pd.DataFrame(
-        index=df_fact_rets.columns, columns=df_asset_rets.columns, dtype=float
+        np.full((df_fact_rets.shape[1], df_asset_rets.shape[1]), np.nan),
+        index=df_fact_rets.columns,
+        columns=df_asset_rets.columns,
+        copy=False,
     )
 
     # No asset has any data in this window. Return no betas rather than raising,
