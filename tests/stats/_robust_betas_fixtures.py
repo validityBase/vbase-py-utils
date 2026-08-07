@@ -67,3 +67,38 @@ def make_multi_factor_ret_frames(
     df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
     df_fact_rets = pd.DataFrame({"SPY": spy_returns, "IWM": iwm_returns})
     return df_asset_rets, df_fact_rets
+
+
+def make_linear_ret_frames(
+    n: int,
+    betas: dict[str, list[float]],
+    factors: list[str],
+    seed: int,
+    noise: float = STD_ASSET_RETS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build synthetic factor and asset returns with a known linear structure.
+
+    Shared by the two pit_robust_betas equivalence suites -- the asset axis's and
+    the date axis's -- so that "identical inputs" means the same bytes rather
+    than two copies of the same generator that can drift apart.
+
+    Args:
+        n: Number of timestamps.
+        betas: Mapping asset name -> list of true betas (one per factor).
+        factors: Factor column names.
+        seed: RNG seed for determinism.
+        noise: Idiosyncratic noise scale.
+
+    Returns:
+        Tuple ``(df_asset_rets, df_fact_rets)``.
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2022-01-03", periods=n, freq="B")
+    fact = {f: rng.normal(0, STD_FACT_RETS, n) for f in factors}
+    df_fact = pd.DataFrame(fact, index=dates)
+    assets = {}
+    for asset, asset_betas in betas.items():
+        signal = sum(b * df_fact[f].values for b, f in zip(asset_betas, factors))
+        assets[asset] = 0.0001 + signal + rng.normal(0, noise, n)
+    df_asset = pd.DataFrame(assets, index=dates)
+    return df_asset, df_fact

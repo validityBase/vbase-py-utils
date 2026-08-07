@@ -777,5 +777,85 @@ class TestPitRobustBetasFactorCoverage(_PanelFixture):
         self.assertIn("rebalance_time_index", str(ctx.exception))
 
 
+class TestPitRobustBetasWorkerPool(_PanelFixture):
+    """The date-loop pool must not spool task arrays to disk."""
+
+    def test_pool_disables_joblib_memmapping(self):
+        """The one pool spans every date, so memmapped args are never reclaimed.
+
+        joblib dumps any task array over max_nbytes to a file under /dev/shm and
+        unlinks it when the pool exits. This pool exits only at the end of the
+        run, so the default 1 MB threshold accumulates one (window x n_assets)
+        slice per rebalance date -- n_assets*8*T^2/2 over a full history, which
+        exhausts the filesystem and fails the build with ENOSPC.
+
+        The axis is named explicitly: this pool belongs to the asset axis, which
+        ships a panel slice per task. The date axis holds its own pool in
+        _date_betas and ships a list of ints, so it never reaches this code.
+        """
+        captured = {}
+        real_parallel = pit_robust_betas_module.Parallel
+
+        def recording_parallel(*args, **kwargs):
+            captured.update(kwargs)
+            return real_parallel(*args, **kwargs)
+
+        pit_robust_betas_module.Parallel = recording_parallel
+        try:
+            pit_robust_betas(
+                self.df_asset_rets,
+                self.df_fact_rets,
+                half_life=30,
+                parallel=True,
+                parallel_axis="asset",
+                n_jobs=2,
+            )
+        finally:
+            pit_robust_betas_module.Parallel = real_parallel
+
+        self.assertIn("max_nbytes", captured)
+        self.assertIsNone(captured["max_nbytes"])
+
+
+class TestPitRobustBetasHedgeRetsByFact(_PanelFixture):
+    """The by-factor hedge panel is optional in the result, never in the math."""
+
+    def test_returned_by_default(self):
+        """Omitting the argument keeps the historical four-key result."""
+        results = pit_robust_betas(self.df_asset_rets, self.df_fact_rets, half_life=30)
+
+        self.assertIn("df_hedge_rets_by_fact", results)
+
+    def test_omitted_when_not_requested(self):
+        """False drops the key rather than returning an empty placeholder."""
+        results = pit_robust_betas(
+            self.df_asset_rets,
+            self.df_fact_rets,
+            half_life=30,
+            return_hedge_rets_by_fact=False,
+        )
+
+        self.assertNotIn("df_hedge_rets_by_fact", results)
+        self.assertEqual(set(results), {"df_betas", "df_hedge_rets", "df_asset_resids"})
+
+    def test_other_frames_are_unchanged(self):
+        """Dropping the panel must not perturb what is derived from it.
+
+        df_hedge_rets is its per-timestamp sum and df_asset_resids follows from
+        that, so freeing the panel early would be a silent numerical change
+        rather than a memory saving if it moved either of them.
+        """
+        kept = pit_robust_betas(self.df_asset_rets, self.df_fact_rets, half_life=30)
+        dropped = pit_robust_betas(
+            self.df_asset_rets,
+            self.df_fact_rets,
+            half_life=30,
+            return_hedge_rets_by_fact=False,
+        )
+
+        for key in ("df_betas", "df_hedge_rets", "df_asset_resids"):
+            pd.testing.assert_frame_equal(kept[key], dropped[key])
+
+
 if __name__ == "__main__":
     unittest.main()
