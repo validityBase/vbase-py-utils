@@ -313,7 +313,10 @@ def precompute_date_betas(
 
         date_ok[i] = True
 
-    n_fit_dates = int(date_ok.sum())
+    # Count rebalance dates (not unique rows) whose row passed all checks.
+    # Multiple rebalance timestamps can map to the same input row; each is
+    # dispatched individually, so count through pos rather than summing date_ok.
+    n_fit_dates = int(date_ok[pos[pos >= 0]].sum())
     logger.debug(
         "precompute_date_betas: done in %.2fs; %d/%d rebalance dates will be fit",
         time.monotonic() - t0,

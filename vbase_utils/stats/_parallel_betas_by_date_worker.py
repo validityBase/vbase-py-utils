@@ -184,9 +184,10 @@ def fit_date_group(
     ``number of dates x number of factors x number of assets x 8 bytes``.
 
     Only one group's results per worker is held at a time because the parent
-    consumes groups as they finish. The result size grows with
-    ``blocks_per_worker`` and with the number of factors, so increasing either
-    setting also increases memory use.
+    consumes groups as they finish. The result size grows with the number of
+    factors and shrinks as ``blocks_per_worker`` increases (more groups means
+    fewer dates per group and a smaller payload). Lowering ``blocks_per_worker``
+    therefore increases memory use per result; raising it reduces it.
     """
     pc = _G["pc"]
     t0 = time.monotonic()
