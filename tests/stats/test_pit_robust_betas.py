@@ -791,7 +791,7 @@ class TestPitRobustBetasWorkerPool(_PanelFixture):
 
         The axis is named explicitly: this pool belongs to the asset axis, which
         ships a panel slice per task. The date axis holds its own pool in
-        _date_betas and ships a list of ints, so it never reaches this code.
+        _parallel_betas_by_date and ships a list of ints, so it never reaches this code.
         """
         captured = {}
         real_parallel = pit_robust_betas_module.Parallel

@@ -15,10 +15,7 @@ from tests.stats._robust_betas_fixtures import (
     make_single_asset_ret_frames,
 )
 from vbase_utils.stats._huber_rlm import fit_huber_rlm_params as real_fit
-from vbase_utils.stats.robust_betas import (
-    NEAR_ZERO_VARIANCE_THRESHOLD,
-    robust_betas,
-)
+from vbase_utils.stats.robust_betas import NEAR_ZERO_VARIANCE_THRESHOLD, robust_betas
 
 DEFAULT_DELTA = 0.2
 

@@ -20,13 +20,11 @@ import warnings
 import numpy as np
 from pandas.testing import assert_frame_equal
 
-from vbase_utils.stats._fast_betas import compute_betas_fast
+from vbase_utils.stats._parallel_betas_by_asset import compute_betas_by_asset
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
 from vbase_utils.stats.robust_betas import robust_betas
 
-from ._robust_betas_fixtures import (
-    make_linear_ret_frames as _make_returns,
-)
+from ._robust_betas_fixtures import make_linear_ret_frames as _make_returns
 
 
 def _assert_equiv(parallel: dict, serial: dict) -> None:
@@ -193,7 +191,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
         last occurrence of a duplicate: one asset's betas were written into the
         other's slot and its own column stayed NaN, while the serial path -- which
         indexes by position already -- returned both. Fits go straight through
-        compute_betas_fast here, since pit_robust_betas rejects duplicate names
+        compute_betas_by_asset here, since pit_robust_betas rejects duplicate names
         before reaching either path.
         """
         df_asset, df_fact = _make_returns(
@@ -205,7 +203,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
         df_asset.columns = ["DUP", "DUP"]
 
         serial = robust_betas(df_asset, df_fact, half_life=30.0, min_timestamps=20)
-        parallel = compute_betas_fast(
+        parallel = compute_betas_by_asset(
             df_asset, df_fact, half_life=30.0, min_timestamps=20, n_jobs=2
         )
 
