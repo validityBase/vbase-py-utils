@@ -318,7 +318,7 @@ def precompute_date_betas(
     # dispatched individually, so count through pos rather than summing date_ok.
     n_fit_dates = int(date_ok[pos[pos >= 0]].sum())
     logger.debug(
-        "precompute_date_betas: done in %.2fs; %d/%d rebalance dates will be fit",
+        "precompute_date_betas: done in %.2fs; %d/%d rebalance dates passed window checks",
         time.monotonic() - t0,
         n_fit_dates,
         n_rebalance,
@@ -451,11 +451,12 @@ def _betas_date_parallel(
         blocks = _blocks(pc["pos"], n_blocks)
         n_facts = pc["n_facts"]
         logger.debug(
-            "date_parallel: n_blocks=%d (eff=%d x blocks_per_worker=%d); "
-            "creating worker pool",
-            len(blocks),
+            "date_parallel: n_blocks_requested=%d (eff=%d x blocks_per_worker=%d) "
+            "n_blocks_actual=%d (empty blocks removed); creating worker pool",
+            n_blocks,
             eff,
             blocks_per_worker,
+            len(blocks),
         )
 
         t_pool = time.monotonic()
