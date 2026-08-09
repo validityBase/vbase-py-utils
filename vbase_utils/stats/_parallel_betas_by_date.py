@@ -495,7 +495,17 @@ def _betas_date_parallel(
             time.monotonic() - t_pool,
         )
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        # Release the parent's memory-mapped file handles before removing the
+        # directory. On Windows, open handles prevent deletion and
+        # ignore_errors=True would silently leak the spill directory across
+        # repeated calls. Workers are shut down by Parallel.__exit__ before
+        # this block runs, so only the parent's handles need explicit release.
+        for key in ("a", "f", "valid", "cs_valid"):
+            pc.pop(key, None)
+        try:
+            shutil.rmtree(tmpdir)
+        except OSError as exc:
+            logger.warning("date_parallel: failed to clean up %s: %s", tmpdir, exc)
 
 
 def _fill_missing_betas(
@@ -583,6 +593,7 @@ def fill_betas_by_date(
     """
     # pylint: disable=import-outside-toplevel
     from joblib import effective_n_jobs
+    from threadpoolctl import threadpool_limits
 
     if rebalance_time_index is None:
         rebalance_time_index = df_asset_rets.index
@@ -613,7 +624,12 @@ def fill_betas_by_date(
     if eff == 1:
         logger.debug("fill_betas_by_date: running serial date loop (eff_jobs=1)")
         pc["asset_names"] = list(df_asset_rets.columns)
-        _betas_serial(pc, betas_buf, progress)
+        # Pin BLAS to one thread, matching the non-parallel PIT path. The Huber
+        # IRLS calls LAPACK SVD repeatedly; without this limit the serial path
+        # runs at the caller's ambient thread count while the parallel path (via
+        # inner_max_num_threads=1) always uses one.
+        with threadpool_limits(limits=1, user_api="blas"):
+            _betas_serial(pc, betas_buf, progress)
     else:
         _betas_date_parallel(
             pc,

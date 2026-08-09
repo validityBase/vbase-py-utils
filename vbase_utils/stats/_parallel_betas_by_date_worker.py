@@ -27,8 +27,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
-from vbase_utils.stats._parallel_betas_by_asset_worker import initialize_asset_worker
 from vbase_utils.stats._huber_rlm import fit_huber_rlm_params
+from vbase_utils.stats._parallel_betas_by_asset_worker import initialize_asset_worker
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())

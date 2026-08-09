@@ -83,6 +83,7 @@ def compute_betas_by_asset(
     # pylint: disable=import-outside-toplevel
     import pandas as pd
     from joblib import Parallel, delayed, effective_n_jobs
+    from threadpoolctl import threadpool_limits
 
     from vbase_utils.stats.robust_betas import prepare_weighted_regression_inputs
 
@@ -142,14 +143,22 @@ def compute_betas_by_asset(
     )
 
     t_parallel = time.monotonic()
-    if parallel is None:
-        results = Parallel(
-            n_jobs=n_jobs,
-            initializer=initialize_asset_worker,
-            inner_max_num_threads=1,
-        )(tasks)
-    else:
-        results = parallel(tasks)
+    # Pin BLAS to one thread. When eff_jobs == 1, joblib uses its sequential
+    # backend and does not call initialize_asset_worker; tasks therefore run in
+    # the parent with its ambient thread count. inner_max_num_threads=1 is not
+    # applied by all backends in sequential mode, so enforce the limit here.
+    # For eff_jobs > 1 the parent does no BLAS work while workers run, so this
+    # wrapper is harmless; thread limiting in workers is done by
+    # inner_max_num_threads=1 in the Parallel object.
+    with threadpool_limits(limits=1, user_api="blas"):
+        if parallel is None:
+            results = Parallel(
+                n_jobs=n_jobs,
+                initializer=initialize_asset_worker,
+                inner_max_num_threads=1,
+            )(tasks)
+        else:
+            results = parallel(tasks)
     logger.debug(
         "compute_betas_by_asset: all groups done in %.2fs",
         time.monotonic() - t_parallel,
