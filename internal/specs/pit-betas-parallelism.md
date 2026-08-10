@@ -27,7 +27,7 @@ One full `(T, N)` float64 frame is 234 MB.
 ## 2. joblib auto-memmapping exhausted the spool filesystem
 
 `pit_robust_betas` holds **one** `joblib.Parallel` for the whole date loop, and
-`compute_betas_fast` ships a `(window, chunk)` slice per task. joblib memmaps any
+`compute_betas_by_asset` ships a `(window, group)` slice per task. joblib memmaps any
 task array over `max_nbytes` (default 1 MB) into a file under `/dev/shm` (or
 `$TMPDIR`), and those files are reclaimed **only when the pool exits**. The spool
 therefore grew as the cumulative sum of shipped bytes rather than staying at the
@@ -66,7 +66,7 @@ concludes there is no growth.
 ## 3. Per-date transient on the asset axis
 
 Parent-side allocation per rebalance date, T=1393 N=21000 K=1, `n_jobs=6`, from
-`tracemalloc` around a single `compute_betas_fast` call:
+`tracemalloc` around a single `compute_betas_by_asset` call:
 
 | window t | live cols | t*N*8 MB | parent peak MB | x panel slice |
 |---|---|---|---|---|
@@ -181,7 +181,7 @@ of thousands of assets the measured speedup is 1.6-2.4x.
 2794 MB peak PSS against 2519 MB. Recorded so whoever picks it up does not
 restart the analysis. Candidates, in order of suspicion:
 
-1. **The panel is held twice.** `precompute` takes
+1. **The panel is held twice.** `precompute_date_betas` takes
    `np.ascontiguousarray(df_asset_rets.to_numpy())` while the caller's frame is
    still alive, then spills that copy and re-maps it. Peak inside `precompute`,
    before the pool starts: caller frame 234 + `a` 234 + `cs_valid` 117 + `valid`

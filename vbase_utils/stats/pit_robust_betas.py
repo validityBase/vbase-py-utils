@@ -9,8 +9,9 @@ from joblib import Parallel
 from threadpoolctl import threadpool_limits
 
 from vbase_utils.sim import sim
-from vbase_utils.stats._date_betas import fill_betas_buf_by_date
-from vbase_utils.stats._fast_betas import _init_worker, compute_betas_fast
+from vbase_utils.stats._parallel_betas_by_asset import compute_betas_by_asset
+from vbase_utils.stats._parallel_betas_by_asset_worker import initialize_asset_worker
+from vbase_utils.stats._parallel_betas_by_date import fill_betas_by_date
 from vbase_utils.stats.robust_betas import (
     NEAR_ZERO_VARIANCE_THRESHOLD,
     finite_column_variances,
@@ -124,8 +125,8 @@ def pit_robust_betas(
             asset axis. Over-decomposition evens out the ragged per-date cost --
             a late window is far more expensive than an early one -- at the price
             of more tasks. It also sizes the result payload each task ships back
-            (see ``_date_worker.date_block``), so raising it is a memory decision
-            as well as a scheduling one. Defaults to 4.
+            (see ``_parallel_betas_by_date_worker.fit_date_group``), so raising it
+            is a memory decision as well as a scheduling one. Defaults to 4.
         return_hedge_rets_by_fact: Whether to include 'df_hedge_rets_by_fact' in the
             result. Defaults to True. It is the largest frame this function builds, at
             (n_timestamps * n_factors, n_assets), and it cannot be skipped outright --
@@ -294,7 +295,7 @@ def pit_robust_betas(
         # out across chunked asset blocks (numpy + numba workers, BLAS pinned to one
         # thread per worker); otherwise run them serially. Identical betas either way.
         if parallel:
-            beta_matrix = compute_betas_fast(
+            beta_matrix = compute_betas_by_asset(
                 df_asset_rets,
                 df_fact_rets,
                 half_life=half_life,
@@ -382,7 +383,7 @@ def pit_robust_betas(
     # * parallel=True, parallel_axis="date" -- sim() is replaced outright. The
     #   window gates it and robust_betas derive per date are answered once, up
     #   front, from cumulative row-level facts, and the dates themselves are the
-    #   unit of work. See _date_betas, which documents each gate against the
+    #   unit of work. See _parallel_betas_by_date, which documents each check against the
     #   serial code it reproduces.
     #
     # Only the fit stage differs. Everything below this block -- the frame
@@ -390,7 +391,7 @@ def pit_robust_betas(
     # arithmetic -- is shared, so a change there cannot diverge across axes.
     if len(df_asset_rets.index) >= min_timestamps:
         if parallel and parallel_axis == "date":
-            fill_betas_buf_by_date(
+            fill_betas_by_date(
                 betas_buf,
                 df_asset_rets,
                 df_fact_rets,
@@ -430,7 +431,7 @@ def pit_robust_betas(
                 # each with its task and holds the spool at zero.
                 with Parallel(
                     n_jobs=n_jobs,
-                    initializer=_init_worker,
+                    initializer=initialize_asset_worker,
                     inner_max_num_threads=1,
                     max_nbytes=None,
                 ) as par:

@@ -3,7 +3,7 @@
 ``parallel_axis="date"`` replaces the ``sim()`` loop outright rather than
 parallelizing inside it, so the two paths derive the same window rules from
 different data: ``sim()`` masks and drops all-NaN columns per date, while
-``_date_betas.precompute`` answers every gate once from cumulative row-level
+``_parallel_betas_by_date.precompute_date_betas`` answers every check once from cumulative row-level
 facts. A divergence between them does not crash -- it silently returns different
 betas -- so this suite is the gate, and it asserts bit-identity of **all four**
 returned frames rather than just the betas.
@@ -21,9 +21,7 @@ from pandas.testing import assert_frame_equal
 
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
 
-from ._robust_betas_fixtures import (
-    make_linear_ret_frames as _make_returns,
-)
+from ._robust_betas_fixtures import make_linear_ret_frames as _make_returns
 
 # Worker count for the parallel runs. More than one so the pool really forks
 # (n_jobs=1 takes joblib's sequential backend, which is covered separately).

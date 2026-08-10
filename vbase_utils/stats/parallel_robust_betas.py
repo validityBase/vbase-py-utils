@@ -1,6 +1,6 @@
 """Parallel robust timeseries regression.
 
-Thin wrapper over :func:`vbase_utils.stats._fast_betas.compute_betas_fast`, which
+Thin wrapper over :func:`vbase_utils.stats._parallel_betas_by_asset.compute_betas_by_asset`, which
 fans the per-asset Huber-RLM fits out across processes in chunked asset blocks
 (one joblib task per block, numpy + numba workers with BLAS pinned to a single
 thread). See that module for the rationale; the fit itself is the numba/JIT
@@ -11,7 +11,7 @@ import logging
 
 import pandas as pd
 
-from vbase_utils.stats._fast_betas import compute_betas_fast
+from vbase_utils.stats._parallel_betas_by_asset import compute_betas_by_asset
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -57,7 +57,14 @@ def parallel_robust_betas(
             Note: insufficient timestamps (< min_timestamps) returns an all-NaN
             beta matrix with a warning rather than raising.
     """
-    return compute_betas_fast(
+    logger.debug(
+        "parallel_robust_betas: n_timestamps=%d n_assets=%d n_factors=%d n_jobs=%d",
+        df_asset_rets.shape[0],
+        df_asset_rets.shape[1],
+        df_fact_rets.shape[1],
+        n_jobs,
+    )
+    result = compute_betas_by_asset(
         df_asset_rets,
         df_fact_rets,
         half_life=half_life,
@@ -65,3 +72,5 @@ def parallel_robust_betas(
         min_timestamps=min_timestamps,
         n_jobs=n_jobs,
     )
+    logger.debug("parallel_robust_betas: done")
+    return result
