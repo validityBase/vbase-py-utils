@@ -169,7 +169,7 @@ def initialize_date_worker(
     logger.debug(
         "initialize_date_worker: pid=%d mapped arrays loaded; n_facts=%d; worker ready",
         os.getpid(),
-        pc.get("n_facts", "?"),
+        pc["n_facts"],
     )
 
 
