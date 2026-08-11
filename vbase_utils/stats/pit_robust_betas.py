@@ -125,8 +125,9 @@ def pit_robust_betas(
             asset axis. Over-decomposition evens out the ragged per-date cost --
             a late window is far more expensive than an early one -- at the price
             of more tasks. It also sizes the result payload each task ships back
-            (see ``_parallel_betas_by_date_worker.fit_date_group``), so raising it
-            is a memory decision as well as a scheduling one. Defaults to 4.
+            (see ``_parallel_betas_by_date_worker.fit_date_group``): more blocks
+            means fewer dates per block, so raising it *reduces* peak memory as
+            well as evening out the schedule. Defaults to 4.
         return_hedge_rets_by_fact: Whether to include 'df_hedge_rets_by_fact' in the
             result. Defaults to True. It is the largest frame this function builds, at
             (n_timestamps * n_factors, n_assets), and it cannot be skipped outright --
