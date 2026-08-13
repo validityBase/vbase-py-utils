@@ -496,10 +496,15 @@ def _betas_date_parallel(
         )
     finally:
         # Release the parent's memory-mapped file handles before removing the
-        # directory. On Windows, open handles prevent deletion and
-        # ignore_errors=True would silently leak the spill directory across
-        # repeated calls. Workers are shut down by Parallel.__exit__ before
-        # this block runs, so only the parent's handles need explicit release.
+        # directory. On POSIX this is enough: unlinking a file other processes
+        # still have open is legal. On Windows it is not sufficient -- loky's
+        # backend deliberately keeps its workers alive for reuse across calls
+        # (Parallel.__exit__ clears bookkeeping but does not terminate them), so
+        # the workers still hold read-only mmaps here and rmtree raises
+        # PermissionError. The warning below surfaces that leak instead of
+        # hiding it the way ignore_errors=True did; closing it would mean
+        # shutting down the reusable executor and paying pool startup on every
+        # call.
         for key in ("a", "f", "valid", "cs_valid"):
             pc.pop(key, None)
         try:
