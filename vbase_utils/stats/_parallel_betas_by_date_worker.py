@@ -136,12 +136,18 @@ _G: Dict[str, Any] = {}
 def initialize_date_worker(
     paths: Dict[str, str], meta: Dict[str, Any], asset_names: Optional[List[str]] = None
 ) -> None:
-    """Load read-only arrays once per worker and prepare the fit code.
+    """Record where the shared arrays are and prepare the fit code.
 
-    ``mmap_mode="r"`` opens the arrays as read-only memory-mapped files. The
-    operating system can share the same cached memory pages among workers, so
-    the arrays need only one physical copy. Each task sends only a list of
-    integer positions rather than the arrays themselves.
+    The arrays are not opened here. loky starts every worker at once and does
+    not wait for this function to finish, so a worker can still be warming up
+    when the parent has collected every block and removed the spill directory in
+    its ``finally``. Opening the files here would then fail with
+    ``FileNotFoundError`` in a process that never had work to do. Opening them
+    in the first task instead means a worker touches the files only when it has
+    a block to fit, and blocks always complete before the parent cleans up.
+    Measured at 32 workers on a run whose dates were all rejected: 27-29 workers
+    failed this way before the change and none after, with no change in fit time
+    or peak memory.
 
     ``joblib.Parallel(n_jobs=1)`` uses its sequential mode and does not call the
     worker setup function. The calling module therefore handles that case with
@@ -157,20 +163,48 @@ def initialize_date_worker(
     # initialize_asset_worker has configured the worker's logging handlers.
     n_assets = len(asset_names) if asset_names is not None else 0
     logger.debug(
-        "initialize_date_worker: pid=%d loading %d mapped arrays; n_assets=%d",
+        "initialize_date_worker: pid=%d recorded %d array paths; n_assets=%d; "
+        "worker ready",
         os.getpid(),
         len(paths),
         n_assets,
     )
-    pc: Dict[str, Any] = {k: np.load(p, mmap_mode="r") for k, p in paths.items()}
-    pc.update(meta)
-    pc["asset_names"] = asset_names
+    _G["paths"] = paths
+    _G["meta"] = meta
+    _G["asset_names"] = asset_names
+    # A worker is initialized once per process, but clear any previous mapping
+    # so a stale one can never outlive the paths it was opened from.
+    _G.pop("pc", None)
+
+
+def _precomputed() -> Dict[str, Any]:
+    """Return this worker's precomputed inputs, opening the arrays on first use.
+
+    ``mmap_mode="r"`` opens the arrays as read-only memory-mapped files. The
+    operating system can share the same cached memory pages among workers, so
+    the arrays need only one physical copy. Each task sends only a list of
+    integer positions rather than the arrays themselves. Opening a mapping reads
+    no data, so the first task pays only the cost of the ``open`` calls.
+    """
+    pc = _G.get("pc")
+    if pc is not None:
+        return pc
+    paths = _G["paths"]
+    logger.debug(
+        "date worker: pid=%d loading %d mapped arrays",
+        os.getpid(),
+        len(paths),
+    )
+    pc = {k: np.load(p, mmap_mode="r") for k, p in paths.items()}
+    pc.update(_G["meta"])
+    pc["asset_names"] = _G["asset_names"]
     _G["pc"] = pc
     logger.debug(
-        "initialize_date_worker: pid=%d mapped arrays loaded; n_facts=%d; worker ready",
+        "date worker: pid=%d mapped arrays loaded; n_facts=%d",
         os.getpid(),
         pc["n_facts"],
     )
+    return pc
 
 
 def fit_date_group(
@@ -189,7 +223,7 @@ def fit_date_group(
     fewer dates per group and a smaller payload). Lowering ``blocks_per_worker``
     therefore increases memory use per result; raising it reduces it.
     """
-    pc = _G["pc"]
+    pc = _precomputed()
     t0 = time.monotonic()
     n_dates = len(rows_and_positions)
     first_row = rows_and_positions[0][1] if rows_and_positions else -1
