@@ -59,6 +59,15 @@ from vbase_utils.stats.robust_betas import (
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+# The precomputed entries written to disk for the workers to memory-map. Named
+# here rather than inside the parallel path so tests exercising a worker spill
+# the same set the parallel path does.
+SPILL_KEYS = ("a", "f", "valid", "cs_valid", "pw", "date_ok")
+
+# The entries passed to the workers by value. They are scalars, so sending a
+# copy to each worker costs nothing.
+META_KEYS = ("n_facts", "min_timestamps")
+
 
 def _check_spill_target(spill_dir: str, n_bytes: int) -> None:
     """Warn if the temporary files may not fit in their directory.
@@ -441,8 +450,7 @@ def _betas_date_parallel(
     from joblib import Parallel, delayed, effective_n_jobs
 
     eff = effective_n_jobs(n_jobs)
-    spill_keys = ("a", "f", "valid", "cs_valid", "pw", "date_ok")
-    n_bytes = sum(int(pc[key].nbytes) for key in spill_keys)
+    n_bytes = sum(int(pc[key].nbytes) for key in SPILL_KEYS)
     tmpdir = tempfile.mkdtemp(prefix="vbase_date_betas_")
     logger.debug(
         "date_parallel: n_jobs=%d eff=%d n_assets=%d spill=%.0fMB tmpdir=%s",
@@ -456,14 +464,14 @@ def _betas_date_parallel(
         _check_spill_target(tmpdir, n_bytes)
         paths = {}
         t_spill = time.monotonic()
-        for key in spill_keys:
+        for key in SPILL_KEYS:
             path = os.path.join(tmpdir, f"{key}.npy")
             np.save(path, pc[key])
             paths[key] = path
         logger.debug(
             "date_parallel: panel spilled to disk in %.2fs", time.monotonic() - t_spill
         )
-        meta = {k: pc[k] for k in ("n_facts", "min_timestamps")}
+        meta = {k: pc[k] for k in META_KEYS}
 
         # Reopen the arrays as read-only memory-mapped files. The operating
         # system can share the same cached pages among workers, so the arrays
@@ -506,6 +514,11 @@ def _betas_date_parallel(
             # the parent learns nothing until a whole block comes back. The dates
             # a block covers are known once it returns, so they are carried in the
             # postfix -- blocks measure the schedule, dates measure the work.
+            #
+            # The count comes back with the block rather than being taken from
+            # the results, which hold only the dates that produced betas: a run
+            # whose dates are all rejected returns no results at all and would
+            # otherwise report no progress while completing every block.
             n_dates = sum(len(b) for b in blocks)
             n_dates_done = 0
             iterator = _progress_iter(
@@ -515,10 +528,10 @@ def _betas_date_parallel(
                 "blocks",
                 total=len(blocks),
             )
-            for blk in iterator:
+            for n_dates_in_block, blk in iterator:
                 for r, cols, params in blk:
                     _write_block(buf, r, n_facts, cols, params)
-                n_dates_done += len(blk)
+                n_dates_done += n_dates_in_block
                 del blk
                 n_completed += 1
                 if progress:

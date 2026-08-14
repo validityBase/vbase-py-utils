@@ -209,8 +209,13 @@ def _precomputed() -> Dict[str, Any]:
 
 def fit_date_group(
     rows_and_positions: Sequence[Tuple[int, int]],
-) -> List[Tuple[int, NDArray[np.intp], NDArray[np.floating]]]:
-    """Fit a group of rebalance dates and return ``[(row, cols, params)]``.
+) -> Tuple[int, List[Tuple[int, NDArray[np.intp], NDArray[np.floating]]]]:
+    """Fit a group of dates and return ``(n_dates, [(row, cols, params)])``.
+
+    The number of dates the group covers is returned alongside the fits because
+    the list holds only the dates that produced betas: a rejected date and a
+    date whose fit failed are both absent from it. The caller uses the count to
+    report progress, and cannot recover it from the results.
 
     Each fitted date returns an ``n_facts x len(cols)`` float64 array. A group's
     result size is therefore approximately:
@@ -261,4 +266,4 @@ def fit_date_group(
         len(out),
         time.monotonic() - t0,
     )
-    return out
+    return n_dates, out
