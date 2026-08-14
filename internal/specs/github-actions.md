@@ -44,3 +44,15 @@ pylint $(git ls-files '*.py')
 - Installs development dependencies through `setup-python-deps@v1`.
 - Installs the package locally with `python -m pip install --no-deps --no-build-isolation -e .`.
 - Runs `python -m unittest discover -s tests`.
+
+### `.github/workflows/repo-backup.yml`
+- Runs daily and through manual dispatch to create a full-history git bundle
+  backup.
+- Delegates to `validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v1`.
+- Uses reviewed moving major tags for validityBase-owned shared workflows so
+  centrally reviewed fixes roll forward without per-repository pin updates.
+- Requires `VBASE_COMMON_REPO_READ_TOKEN` and
+  `VBASE_REPO_BACKUP_SECRETS_TOKEN` GitHub Actions secrets.
+- Reads object storage credentials from the `vbase-repo-backups` Bitwarden
+  project at runtime; bucket lifecycle and restore-test policy live outside
+  this repository.
