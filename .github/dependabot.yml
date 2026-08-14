@@ -3,11 +3,10 @@
 version: 2
 updates:
   - package-ecosystem: "pip"
-    # Scan repo root for package metadata requirements.in and /requirements
-    # for pip-compile terminal environment inputs/outputs.
-    directories:
-      - "/"
-      - "/requirements"
+    # Scan /requirements as the single pip-compile graph. Its dev.in follows
+    # ../requirements.in, so Dependabot includes the root runtime input without
+    # processing the same graph as a second directory.
+    directory: "/requirements"
     schedule:
       interval: "daily"
       time: "00:00"
