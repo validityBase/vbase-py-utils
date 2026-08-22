@@ -162,7 +162,7 @@ def resolve_decay_lambda(
     # before either. The checks are nested rather than chained only so the type
     # of half_life is pinned on the derivation below.
     if half_life is not None and (not np.isfinite(half_life) or half_life <= 0):
-        raise ValueError("half_life must be positive.")
+        raise ValueError("half_life must be positive and finite.")
     if lambda_ is not None:
         if not 0 < lambda_ < 1:
             raise ValueError("lambda_ must be between 0 and 1.")

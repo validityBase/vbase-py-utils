@@ -110,11 +110,11 @@ class TestRobustBetas(unittest.TestCase):
             robust_betas(df_asset_rets, df_fact_rets, half_life=30)
 
     def test_invalid_half_life(self):
-        """Test handling of negative or zero half_life."""
+        """Test handling of negative, zero, or non-finite half_life."""
         asset_returns = 1.5 * self.spy_returns
         df_asset_rets = pd.DataFrame({"Asset1": asset_returns})
         df_fact_rets = pd.DataFrame({"SPY": self.spy_returns})
-        for invalid_half_life in [0, -1]:
+        for invalid_half_life in [0, -1, np.nan, np.inf, -np.inf]:
             with self.assertRaises(ValueError):
                 robust_betas(df_asset_rets, df_fact_rets, half_life=invalid_half_life)
 
