@@ -164,8 +164,9 @@ def pit_robust_betas(
           the asset residuals at each timestamp
 
     Raises:
-        ValueError: If inputs are empty, have mismatched rows,
-            or if timestamps don't align.
+        ValueError: If inputs are empty, have mismatched rows, or if timestamps
+            don't align. Also raised if ``parallel_axis`` is not a recognised
+            value or ``blocks_per_worker`` is not a positive integer.
     """
     # Validate input data
     # Checked whether or not parallel is set: a misspelled axis is a caller
@@ -174,6 +175,10 @@ def pit_robust_betas(
     if parallel_axis not in _PARALLEL_AXES:
         raise ValueError(
             f"parallel_axis must be one of {_PARALLEL_AXES}, got {parallel_axis!r}"
+        )
+    if not isinstance(blocks_per_worker, int) or blocks_per_worker < 1:
+        raise ValueError(
+            f"blocks_per_worker must be a positive integer, got {blocks_per_worker!r}"
         )
     if df_asset_rets.empty or df_fact_rets.empty:
         raise ValueError("Input DataFrames cannot be empty")
