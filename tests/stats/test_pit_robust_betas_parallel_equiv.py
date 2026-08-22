@@ -4,6 +4,11 @@ The parallel=True path fans the per-asset RLM fits out across processes via
 parallel_robust_betas (BLAS pinned per worker). Its output must be identical to
 the parallel=False (serial robust_betas) path.
 
+Every call here names ``parallel_axis="asset"`` explicitly. The default is
+``"date"``, which is a different implementation with its own suite in
+test_pit_robust_betas_date_axis_equiv.py; leaving the axis implicit would silently
+move this file onto that path and stop the asset axis being tested at all.
+
 The gate attempts exact equality first; if cross-process floating-point
 nondeterminism makes it flaky it can be relaxed to atol=1e-6 (the tolerance used
 by tests/stats/test_compare_parallel_serial_betas.py).
@@ -13,43 +18,13 @@ import unittest
 import warnings
 
 import numpy as np
-import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from vbase_utils.stats._fast_betas import compute_betas_fast
+from vbase_utils.stats._parallel_betas_by_asset import compute_betas_by_asset
 from vbase_utils.stats.pit_robust_betas import pit_robust_betas
 from vbase_utils.stats.robust_betas import robust_betas
 
-
-def _make_returns(
-    n: int,
-    betas: dict[str, list[float]],
-    factors: list[str],
-    seed: int,
-    noise: float = 0.005,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build synthetic factor and asset returns with a known linear structure.
-
-    Args:
-        n: Number of timestamps.
-        betas: Mapping asset name -> list of true betas (one per factor).
-        factors: Factor column names.
-        seed: RNG seed for determinism.
-        noise: Idiosyncratic noise scale.
-
-    Returns:
-        Tuple ``(df_asset_rets, df_fact_rets)``.
-    """
-    rng = np.random.default_rng(seed)
-    dates = pd.date_range("2022-01-03", periods=n, freq="B")
-    fact = {f: rng.normal(0, 0.01, n) for f in factors}
-    df_fact = pd.DataFrame(fact, index=dates)
-    assets = {}
-    for asset, asset_betas in betas.items():
-        signal = sum(b * df_fact[f].values for b, f in zip(asset_betas, factors))
-        assets[asset] = 0.0001 + signal + rng.normal(0, noise, n)
-    df_asset = pd.DataFrame(assets, index=dates)
-    return df_asset, df_fact
+from ._robust_betas_fixtures import make_linear_ret_frames as _make_returns
 
 
 def _assert_equiv(parallel: dict, serial: dict) -> None:
@@ -83,7 +58,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "min_timestamps": 20,
             "rebalance_time_index": df_asset.index,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
 
@@ -102,7 +77,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "min_timestamps": 20,
             "rebalance_time_index": df_asset.index,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
 
@@ -131,7 +106,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "min_timestamps": 20,
             "rebalance_time_index": df_asset.index,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
         # Guard against the test passing because nothing was ever fit.
@@ -154,7 +129,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "min_timestamps": 15,
             "rebalance_time_index": reb,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
 
@@ -178,7 +153,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "rebalance_time_index": df_asset.index,
             "fill_missing_betas": True,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
 
@@ -204,7 +179,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
             "min_timestamps": 20,
             "rebalance_time_index": df_asset.index,
         }
-        parallel = pit_robust_betas(**common, parallel=True)
+        parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
         serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
         self.assertTrue(parallel["df_betas"]["DEAD"].isna().all())
@@ -216,7 +191,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
         last occurrence of a duplicate: one asset's betas were written into the
         other's slot and its own column stayed NaN, while the serial path -- which
         indexes by position already -- returned both. Fits go straight through
-        compute_betas_fast here, since pit_robust_betas rejects duplicate names
+        compute_betas_by_asset here, since pit_robust_betas rejects duplicate names
         before reaching either path.
         """
         df_asset, df_fact = _make_returns(
@@ -228,7 +203,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
         df_asset.columns = ["DUP", "DUP"]
 
         serial = robust_betas(df_asset, df_fact, half_life=30.0, min_timestamps=20)
-        parallel = compute_betas_fast(
+        parallel = compute_betas_by_asset(
             df_asset, df_fact, half_life=30.0, min_timestamps=20, n_jobs=2
         )
 
@@ -256,7 +231,7 @@ class TestPitParallelEquivalence(unittest.TestCase):
         }
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            parallel = pit_robust_betas(**common, parallel=True)
+            parallel = pit_robust_betas(**common, parallel=True, parallel_axis="asset")
             serial = pit_robust_betas(**common, parallel=False)
         _assert_equiv(parallel, serial)
         self.assertTrue(parallel["df_betas"].isna().all().all())

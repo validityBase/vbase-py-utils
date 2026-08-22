@@ -113,7 +113,7 @@ class TestParallelRobustBetas(unittest.TestCase):
         )
 
         with patch(
-            "vbase_utils.stats._fast_betas.fit_huber_rlm_params",
+            "vbase_utils.stats._parallel_betas_by_asset_worker.fit_huber_rlm_params",
             side_effect=make_fit_first_call_error_side_effect(real_fit),
         ):
             beta_matrix = parallel_robust_betas(

@@ -50,6 +50,11 @@ def _run_parallel(
         min_timestamps=min_ts,
         rebalance_time_index=df.index,
         parallel=True,
+        # Named rather than left to the default, which is "date": that is a
+        # different implementation with its own equivalence suite
+        # (test_pit_robust_betas_date_axis_equiv.py), and an implicit axis here
+        # would quietly retarget this file and leave the asset axis untested.
+        parallel_axis="asset",
     )
 
 
