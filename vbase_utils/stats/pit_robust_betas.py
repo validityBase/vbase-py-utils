@@ -110,6 +110,12 @@ def pit_robust_betas(
             shape (T=1393, 21000 assets, 1 factor, 6 jobs). At that width it
             also costs ~11% more peak memory, so a caller optimizing for memory
             on a very wide panel should pass ``"asset"``.
+
+            **Behavioral change:** callers that previously passed ``parallel=True``
+            without specifying ``parallel_axis`` received the asset-axis
+            implementation (formerly ``_fast_betas``). Those callers now get
+            date-axis behavior by default; pass ``parallel_axis="asset"`` to
+            restore the prior behavior.
         fill_missing_betas: If True, replaces NaN betas with 1.0 for factor rows where at
             least one asset has a valid beta. Only assets that have listed as of
             that date are filled; an asset with no data yet keeps its NaN.
