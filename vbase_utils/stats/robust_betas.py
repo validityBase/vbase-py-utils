@@ -157,8 +157,8 @@ def resolve_decay_lambda(
         ValueError: If neither half_life nor lambda_ is provided.
         ValueError: If half_life is not a finite positive number, or lambda_ is not between 0 and 1.
     """
-    # Ordered so the raised message is the same one this validation has always
-    # produced: half_life is judged before lambda_, and "neither was provided"
+    # Ordered to preserve the validation precedence that callers have always
+    # observed: half_life is judged before lambda_, and "neither was provided"
     # before either. The checks are nested rather than chained only so the type
     # of half_life is pinned on the derivation below.
     if half_life is not None and (not np.isfinite(half_life) or half_life <= 0):
