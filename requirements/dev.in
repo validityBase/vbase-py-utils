@@ -9,4 +9,4 @@ PyYAML>=6.0.2
 # Test-only: the runtime betas path is the numba/JIT Huber fit (see
 # vbase_utils/stats/_huber_rlm.py); statsmodels is kept solely to assert
 # equivalence in tests/stats/test_handrolled_vs_statsmodels.py.
-statsmodels>=0.14.4,<0.15
+statsmodels>=0.14.4,<0.16
