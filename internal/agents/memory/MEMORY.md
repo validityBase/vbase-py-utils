@@ -28,7 +28,7 @@ projects.
 - vBase-owned shared actions and reusable workflows use reviewed `validityBase/vbase-github-actions` version tags.
 - Pylint delegates to `validityBase/vbase-github-actions/.github/workflows/python-lint.yml@v1`.
 - Unit tests use `validityBase/vbase-github-actions/.github/actions/setup-python-deps@v1`.
-- Repository backup delegates to `validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v1`;
+- Repository backup delegates to `validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v2`;
   details stay in `internal/specs/github-actions.md`.
 - `python-dependency-locks.yml` verifies terminal lock freshness, hash installs,
   editable install, and `pip check`.

@@ -46,9 +46,9 @@ pylint $(git ls-files '*.py')
 - Runs `python -m unittest discover -s tests`.
 
 ### `.github/workflows/repo-backup.yml`
-- Runs daily and through manual dispatch to create a full-history git bundle
-  backup.
-- Delegates to `validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v1`.
+- Runs daily and through manual dispatch. The shared workflow creates a monthly
+  full Git bundle or a daily differential backup.
+- Delegates to `validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v2`.
 - Uses reviewed moving major tags for validityBase-owned shared workflows so
   centrally reviewed fixes roll forward without per-repository pin updates.
 - Requires `VBASE_COMMON_REPO_READ_TOKEN` and

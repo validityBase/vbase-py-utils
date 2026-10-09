@@ -16,7 +16,7 @@ jobs:
   backup:
     # validityBase-owned shared workflows intentionally use reviewed moving
     # major tags; see internal/specs/github-actions.md.
-    uses: validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v1
+    uses: validityBase/vbase-github-actions/.github/workflows/repo-backup.yml@v2
     with:
       backup-prefix: github-backups
       bundle-name: repo.bundle
